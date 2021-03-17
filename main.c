@@ -133,21 +133,6 @@ string_t *config_get(config_t *config, string_t alias) {
   return NULL;
 }
 
-void config_dealloc(config_t config) {
-  link_t *link = config.head;
-  while (link->next) {
-    link_t *tmp = link;
-
-    string_dealloc(&tmp->alias);
-    string_dealloc(&tmp->to);
-
-    link = link->next;
-    free(tmp);
-  }
-}
-
-typedef enum ParserState { KEY, VALUE } parser_state_t;
-
 typedef struct Job {
   void (*fn)(void *);
   void *arg;
@@ -297,6 +282,8 @@ END_SOCK:
   return NULL;
 }
 
+typedef enum ParserState { KEY, VALUE } parser_state_t;
+
 int main() {
   FILE *fp = fopen("config.fso", "r");
   if (!fp) die("failed to open configuration file\n");
@@ -331,25 +318,22 @@ int main() {
                              .sin_addr = {.s_addr = htonl(INADDR_ANY)},
                              .sin_family = AF_INET,
                              .sin_zero = {0}};
-  int addr_sz = sizeof(addr);
-  if (bind(sockfd, (struct sockaddr *)&addr, addr_sz))
+  if (bind(sockfd, (struct sockaddr *)&addr, sizeof(addr)))
     die("failed to bind socket to port\n");
   if (listen(sockfd, MAX_QUEUED_REQUESTS))
     die("failed to begin listening on port\n");
+
+  thread_pool_t *pool = thread_pool_new(THREADS, JOBS);
 
 #ifndef QUIET
   printf("   \033[0;36m[web]\033[0m :: starting server on port %d\n", PORT);
 #endif
 
-  thread_pool_t *pool = thread_pool_new(THREADS, JOBS);
-
   for (;;) {
-    int newfd = accept(sockfd, (struct sockaddr *)&addr, (socklen_t *)&addr_sz);
-    handle_args_t arg = {.fd = newfd, .config = &config};
+    int newfd = accept(sockfd, NULL, NULL);
+    if (newfd == -1) die("failed to accept connection");
 
+    handle_args_t arg = {.fd = newfd, .config = &config};
     thread_pool_queue(pool, (void *)handle_conn, &arg);
   }
-
-  fclose(fp);
-  config_dealloc(config);
 }
