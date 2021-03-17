@@ -20,7 +20,8 @@ and run with:
 ```
 
 todo:
-- [ ] multithreading
+- [x] multithreading
+- [ ] hot-reload config file
 
 developing:
 

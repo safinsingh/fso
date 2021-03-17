@@ -1,4 +1,5 @@
 DEFAULT_GOAL := dev
+.PHONY: test
 
 dev:
 	gcc -o fso -Wno-format-security -g -std=c11 -pthread main.c
