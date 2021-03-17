@@ -307,6 +307,8 @@ int main() {
     }
   }
 
+  fclose(fp);
+
 #ifndef QUIET
   config_print(config);
 #endif
