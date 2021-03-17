@@ -16,8 +16,12 @@
   along with this program.  If not, see <https://www.gnu.org/licenses/>.
 */
 
+#define _POSIX_C_SOURCE 200809L
+
 #include <errno.h>
 #include <netinet/in.h>
+#include <pthread.h>
+#include <stdatomic.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -26,6 +30,8 @@
 #include <unistd.h>
 
 #define PORT 5012
+#define THREADS 8
+#define JOBS 128
 
 void die(char *msg) {
   fprintf(stderr, " \033[0;31m[fatal]\033[0m :: %s", msg);
@@ -113,8 +119,8 @@ void config_print(config_t config) {
   }
 }
 
-string_t *config_get(config_t config, string_t alias) {
-  link_t *link = config.head;
+string_t *config_get(config_t *config, string_t alias) {
+  link_t *link = config->head;
   while (link->next) {
     if (memcmp(link->alias.ptr, alias.ptr, alias.len)) {
       link = link->next;
@@ -132,13 +138,158 @@ void config_dealloc(config_t config) {
 
     string_dealloc(&tmp->alias);
     string_dealloc(&tmp->to);
-    free(tmp);
 
     link = link->next;
+    free(tmp);
   }
 }
 
 typedef enum ParserState { KEY, VALUE } parser_state_t;
+
+typedef struct Job {
+  void (*fn)(void *);
+  void *arg;
+} job_t;
+
+typedef struct ThreadPool {
+  pthread_mutex_t job_lock;
+  pthread_cond_t job_notify;
+  pthread_t *threads;
+  int threads_len;
+
+  job_t *jobs;
+  int jobs_cap;
+  _Atomic(int) jobs_len;
+  _Atomic(int) jobs_head;
+  int jobs_tail;
+} thread_pool_t;
+
+static void *thread_init(void *arg);
+thread_pool_t *thread_pool_new(int threads_len, int jobs_cap) {
+  thread_pool_t *pool = (thread_pool_t *)malloc(sizeof(thread_pool_t));
+  if (!pool) die("Failed to allocate thread pool");
+
+  if (pthread_mutex_init(&pool->job_lock, NULL))
+    die("failed to initialize thread pool job mutex");
+  if (pthread_cond_init(&pool->job_notify, NULL))
+    die("failed to initialize thread pool job condvar");
+
+  pool->jobs_cap = jobs_cap;
+  pool->jobs_head = ATOMIC_VAR_INIT(0);
+  pool->jobs_len = ATOMIC_VAR_INIT(0);
+  pool->jobs_tail = jobs_cap - 1;
+
+  if (!(pool->threads = (pthread_t *)malloc(threads_len * sizeof(pthread_t))))
+    die("failed to allocate pool thread pointers");
+  if (!(pool->jobs = (job_t *)malloc(jobs_cap * sizeof(job_t))))
+    die("failed to allocate pool jobs");
+
+  for (int t = 0; t < threads_len; t++) {
+    if (pthread_create(&pool->threads[t], NULL, (void *)thread_init, pool))
+      die("failed to create thread");
+    pool->threads_len++;
+  }
+
+  return pool;
+}
+
+job_t thread_pool_dequeue(thread_pool_t *pool) {
+  job_t job = pool->jobs[pool->jobs_head];
+  atomic_fetch_add(&pool->jobs_head, 1); // modulo cap?
+  atomic_fetch_sub(&pool->jobs_len, 1);
+  return job;
+}
+
+void thread_pool_enqueue(thread_pool_t *pool, job_t job) {
+  pool->jobs_tail = (pool->jobs_tail + 1) % pool->jobs_cap;
+  pool->jobs[pool->jobs_tail] = job;
+  atomic_fetch_add(&pool->jobs_len, 1);
+}
+
+void *thread_init(void *arg) {
+  thread_pool_t *pool = (thread_pool_t *)arg;
+
+  for (;;) {
+    if (pthread_mutex_lock(&pool->job_lock)) die("failed to lock mutex");
+    while (pool->jobs_len == 0)
+      pthread_cond_wait(&pool->job_notify, &pool->job_lock);
+
+    job_t job = thread_pool_dequeue(pool);
+
+    if (pthread_mutex_unlock(&pool->job_lock)) die("failed to unlock mutex");
+    job.fn(job.arg);
+  }
+
+  pthread_exit(0);
+  return NULL;
+}
+
+void thread_pool_queue(thread_pool_t *pool, void (*fn)(void *), void *arg) {
+  if (pthread_mutex_lock(&pool->job_lock)) die("failed to lock mutex");
+  if (pool->jobs_cap == pool->jobs_len) die("thread pool job queue full");
+
+  thread_pool_enqueue(pool, (job_t){.fn = fn, .arg = arg});
+
+  if (pthread_cond_signal(&pool->job_notify))
+    die("failed to wake up threads with condvar");
+  if (pthread_mutex_lock(&pool->job_lock)) die("failed to unlock mutex");
+}
+
+typedef struct HandleArgs {
+  int fd;
+  config_t *config;
+} handle_args_t;
+
+void *handle_conn(handle_args_t args) {
+  int fd = args.fd;
+  config_t *config = args.config;
+
+  if (!fd) die("Failed to open socket for new connection\n");
+
+#ifndef QUIET
+  printf("   \033[0;36m[web]\033[0m :: got new connection, opening socket %d\n",
+         fd);
+#endif
+
+  const char *prefix = "GET /";
+  char buf[64] = {0};
+  if (read(fd, buf, 64) == -1) die("failed to read from socket");
+
+  if (memcmp(&buf, prefix, 5)) return NULL;
+
+  string_t alias = string_new();
+  for (int i = 5; i < 128; i++) {
+    char a = buf[i];
+    if (a != ' ') string_push(&alias, a);
+    else {
+      if (alias.len == 0) string_push(&alias, '@');
+      break;
+    }
+  }
+
+  string_t res = string_from("HTTP/1.1 307 Temporary Redirect\r\nLocation: ");
+  string_t *redirect = config_get(config, alias);
+  if (!redirect) {
+#ifndef QUIET
+    printf("encountered invalid redirect for: %s\n", alias.ptr);
+#endif
+
+    char *err = "HTTP/1.1 404 Not Found\r\n\r\nInvalid route!";
+    if (write(fd, err, strlen(err)) == -1) die("failed to write to socket");
+    return NULL;
+  }
+
+  string_push_str(&res, redirect->ptr, redirect->len);
+  string_push_str(&res, "\r\n", 2);
+
+  if (write(fd, res.ptr, res.len) == -1) die("failed to write to socket");
+
+  string_dealloc(&res);
+  string_dealloc(&alias);
+  close(fd);
+
+  return NULL;
+}
 
 int main() {
   FILE *fp = fopen("config.fso", "r");
@@ -183,53 +334,16 @@ int main() {
   printf("   \033[0;36m[web]\033[0m :: starting server on port %d\n", PORT);
 #endif
 
+  thread_pool_t *pool = thread_pool_new(THREADS, JOBS);
+
   for (;;) {
     int newfd = accept(sockfd, (struct sockaddr *)&addr, (socklen_t *)&addr_sz);
-    if (!newfd) die("Failed to open socket for new connection\n");
 
-#ifndef QUIET
-    printf(
-        "   \033[0;36m[web]\033[0m :: got new connection, opening socket %d\n",
-        newfd);
-#endif
+    handle_args_t *args = (handle_args_t *)malloc(sizeof(handle_args_t));
+    args->config = &config;
+    args->fd = newfd;
 
-    const char *prefix = "GET /";
-    char buf[64] = {0};
-    if (read(newfd, buf, 64) == -1) die("failed to read from socket");
-
-    if (memcmp(&buf, prefix, 5)) continue;
-
-    string_t alias = string_new();
-    for (int i = 5; i < 128; i++) {
-      char a = buf[i];
-      if (a != ' ') string_push(&alias, a);
-      else {
-        if (alias.len == 0) string_push(&alias, '@');
-        break;
-      }
-    }
-
-    string_t res = string_from("HTTP/1.1 307 Temporary Redirect\r\nLocation: ");
-    string_t *redirect = config_get(config, alias);
-    if (!redirect) {
-#ifndef QUIET
-      printf("encountered invalid redirect for: %s\n", alias.ptr);
-#endif
-
-      char *err = "HTTP/1.1 404 Not Found\r\n\r\nInvalid route!";
-      if (write(newfd, err, strlen(err)) == -1)
-        die("failed to write to socket");
-      continue;
-    }
-
-    string_push_str(&res, redirect->ptr, redirect->len);
-    string_push_str(&res, "\r\n", 2);
-
-    if (write(newfd, res.ptr, res.len) == -1) die("failed to write to socket");
-
-    string_dealloc(&res);
-    string_dealloc(&alias);
-    close(newfd);
+    thread_pool_queue(pool, (void *)handle_conn, args);
   }
 
   fclose(fp);
