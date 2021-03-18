@@ -22,6 +22,7 @@ and run with:
 todo:
 - [x] multithreading
 - [x] hot-reload config file
+- [ ] fix broken fd errors
 
 developing:
 

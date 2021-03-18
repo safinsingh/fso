@@ -1,0 +1,6 @@
+{
+   "files.associations": {
+      "*.hocon": "hocon",
+      "stdarg.h": "c"
+   }
+}

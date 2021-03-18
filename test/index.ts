@@ -13,8 +13,4 @@ await Promise.all([
    fetch('http://localhost:5012'),
    fetch('http://localhost:5012'),
    fetch('http://localhost:5012'),
-   fetch('http://localhost:5012'),
-   fetch('http://localhost:5012'),
-   fetch('http://localhost:5012'),
-   fetch('http://localhost:5012'),
 ])

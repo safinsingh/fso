@@ -1,14 +1,16 @@
-DEFAULT_GOAL := dev
 .PHONY: test
 
-dev:
-	gcc -o fso -Wno-format-security -g -std=c11 -pthread main.c
-	
-prod:
-	gcc -o fso -Wno-format-security -std=c11 -O2 -pthread main.c
+CFLAGS = -std=c11 -pthread -Wall -Werror
+SOURCES = ./src/main.c
+TARGET = ./bin/fso
+DEFAULT_GOAL = dev
+CC = clang
 
-prod-silent:
-	gcc -o fso -Wno-format-security -std=c11 -O2 -DQUIET -pthread main.c
+main:
+	$(CC) -o $(TARGET) $(CFLAGS) -g $(SOURCES)
+
+prod:
+	$(CC) -o $(TARGET)  $(CFLAGS) -O2 $(SOURCES)
 
 test:
 	deno run --allow-net test/index.ts

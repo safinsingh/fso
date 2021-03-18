@@ -1,1 +1,4 @@
+BasedOnStyle: Chromium
 AllowShortIfStatementsOnASingleLine: Always
+Cpp11BracedListStyle: false
+IndentWidth: 2
