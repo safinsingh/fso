@@ -322,8 +322,7 @@ void *handle_conn(int const *fd, config_t *config) {
   int bytes = 0;
 
   for (;;) {
-    int len = read(*fd, buf, sizeof(buf));
-
+    int len = read(*fd, &buf[bytes], REQUEST_BUFFER - bytes);
     if (len == -1) {
       if (errno == EAGAIN) break;
       die("failed to read socket");
@@ -331,7 +330,7 @@ void *handle_conn(int const *fd, config_t *config) {
       break;
     } else {
       bytes += len;
-      if (bytes >= REQUEST_BUFFER) break;
+      if (bytes == REQUEST_BUFFER) break;
     }
   }
 
