@@ -1,7 +1,7 @@
 fso - fast [link] shortener
 ===========================
 
-this is mostly a joke project but it's meant to be a fast implementation of a link shortener. you can configure your links like so in a `config.fso` file:
+fso is a fast implementation of a link shortener. you can configure your links like so in a `config.fso` file like so:
 
 ```
 @     :  https://safin.dev
@@ -21,7 +21,7 @@ and run with:
 
 todo:
 - [x] multithreading
-- [ ] hot-reload config file
+- [x] hot-reload config file
 
 developing:
 

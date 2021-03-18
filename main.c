@@ -401,7 +401,7 @@ int main() {
         if (epoll_ctl(epfd, EPOLL_CTL_ADD, newfd, &accepted_ev))
           die("failed to add connection fd to epoll interest list");
       } else if (event.data.fd == ifd) {
-        int len = read(ifd, last_inotif_ev, INOTIFY_BUF_LEN);
+        int len = read(ifd, last_inotif_ev, sizeof(struct inotify_event));
         if (len == -1 && errno != EAGAIN) die("failed to read from inotify fd");
         if (len <= 0) continue;
 
