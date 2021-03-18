@@ -40,12 +40,24 @@
 #define MAX_QUEUED_REQUESTS 64
 #define CONFIG_FILE "config.fso"
 #define INITIAL_STRING_CAPACITY 32
-#define MAX_EVENTS MAX_QUEUED_REQUESTS + 2
+#define MAX_EVENTS (MAX_QUEUED_REQUESTS + 2)
 
 void die(char *msg) {
-  fprintf(stderr, " \033[0;31m[fatal]\033[0m :: %s", msg);
-  fprintf(stderr, "            Error: %s\n", strerror(errno));
+  fprintf(stderr, " \033[0;31m[fatal]\033[0m :: %s\n            Error: %s\n",
+          msg, strerror(errno));
   exit(EXIT_FAILURE);
+}
+
+void *xmalloc(size_t size) {
+  void *ret = malloc(size);
+  if (!ret) die("failed to allocate with malloc");
+  return ret;
+}
+
+void *xcalloc(size_t els, size_t size) {
+  void *ret = calloc(els, size);
+  if (!ret) die("failed to allocate with calloc");
+  return ret;
 }
 
 typedef struct String {
@@ -56,7 +68,7 @@ typedef struct String {
 
 string_t string_new() {
   static int cap = INITIAL_STRING_CAPACITY;
-  char *ptr = (char *)calloc(cap, sizeof(char));
+  char *ptr = xcalloc(cap, sizeof(*ptr));
   if (!ptr) die("failed to allocate string");
 
   return (string_t){.ptr = ptr, .len = 0, .cap = cap};
@@ -114,8 +126,7 @@ typedef struct ThreadPool {
 
 static void *thread_init(void *arg);
 thread_pool_t *thread_pool_new(int threads_len, int jobs_cap) {
-  thread_pool_t *pool = (thread_pool_t *)malloc(sizeof(thread_pool_t));
-  if (!pool) die("Failed to allocate thread pool");
+  thread_pool_t *pool = xmalloc(sizeof(*pool));
 
   if (pthread_mutex_init(&pool->job_lock, NULL))
     die("failed to initialize thread pool job mutex");
@@ -127,13 +138,11 @@ thread_pool_t *thread_pool_new(int threads_len, int jobs_cap) {
   pool->jobs_len = 0;
   pool->jobs_tail = jobs_cap - 1;
 
-  if (!(pool->threads = (pthread_t *)malloc(threads_len * sizeof(pthread_t))))
-    die("failed to allocate pool thread pointers");
-  if (!(pool->jobs = (job_t *)malloc(jobs_cap * sizeof(job_t))))
-    die("failed to allocate pool jobs");
+  pool->threads = (pthread_t *)xmalloc(threads_len * sizeof(pthread_t));
+  pool->jobs = (job_t *)xmalloc(jobs_cap * sizeof(job_t));
 
   for (int t = 0; t < threads_len; t++) {
-    if (pthread_create(&pool->threads[t], NULL, (void *)thread_init, pool))
+    if (pthread_create(&pool->threads[t], NULL, thread_init, pool))
       die("failed to create thread");
     pool->threads_len++;
   }
@@ -158,14 +167,14 @@ void *thread_init(void *arg) {
   thread_pool_t *pool = (thread_pool_t *)arg;
 
   for (;;) {
-    if (pthread_mutex_lock(&pool->job_lock)) die("failed to lock mutex");
+    pthread_mutex_lock(&pool->job_lock);
     while (pool->jobs_len == 0)
       pthread_cond_wait(&pool->job_notify, &pool->job_lock);
 
     job_t job = thread_pool_dequeue(pool);
+    pthread_mutex_unlock(&pool->job_lock);
 
-    if (pthread_mutex_unlock(&pool->job_lock)) die("failed to unlock mutex");
-    job.fn(job.arg);
+    (job.fn)(job.arg);
   }
 
   pthread_exit(0);
@@ -179,14 +188,14 @@ typedef struct HandleArgs {
 } handle_args_t;
 
 void thread_pool_dispatch(thread_pool_t *pool, void (*fn)(void *), void *arg) {
-  if (pthread_mutex_lock(&pool->job_lock)) die("failed to lock mutex");
+  pthread_mutex_lock(&pool->job_lock);
   if (pool->jobs_cap == pool->jobs_len) die("thread pool job queue full");
 
   thread_pool_enqueue(pool, (job_t){.fn = fn, .arg = arg});
 
   if (pthread_cond_signal(&pool->job_notify))
     die("failed to wake up threads with condvar");
-  if (pthread_mutex_unlock(&pool->job_lock)) die("failed to unlock mutex");
+  pthread_mutex_unlock(&pool->job_lock);
 }
 
 typedef struct Link {
@@ -195,8 +204,8 @@ typedef struct Link {
   struct Link *next;
 } link_t;
 
-link_t *new_link_entry() {
-  link_t *link = (link_t *)malloc(sizeof(link_t));
+link_t *new_link_entry(void) {
+  link_t *link = (link_t *)xmalloc(sizeof(link_t));
   link->alias = string_new();
   link->to = string_new();
   link->next = NULL;
@@ -226,7 +235,7 @@ void config_print(config_t config) {
 string_t *config_get(config_t *config, string_t alias) {
   link_t *link = config->head;
   while (link->next) {
-    if (memcmp(link->alias.ptr, alias.ptr, alias.len)) {
+    if (strncmp(link->alias.ptr, alias.ptr, alias.len)) {
       link = link->next;
     } else {
       return &link->to;
@@ -236,9 +245,9 @@ string_t *config_get(config_t *config, string_t alias) {
 }
 
 typedef enum ParserState { KEY, VALUE } parser_state_t;
-config_t config_parse() {
+config_t config_parse(void) {
   FILE *fp = fopen(CONFIG_FILE, "r");
-  if (!fp) die("failed to open configuration file\n");
+  if (!fp) die("failed to open configuration file");
 
   parser_state_t state = KEY;
   config_t config = {.head = new_link_entry()};
@@ -267,7 +276,7 @@ config_t config_parse() {
   return config;
 }
 
-int config_initialize_inotify() {
+int config_initialize_inotify(void) {
   int ifd = inotify_init1(IN_NONBLOCK);
   if (ifd < 0) die("failed to initialize an inotify instance");
 
@@ -278,14 +287,13 @@ int config_initialize_inotify() {
 }
 
 void sock_set_nonblock(int fd) {
-  if (fd < 0) die("failed to create new socket");
   int flags = fcntl(fd, F_GETFL);
   if (flags < 0) die("failed to retrieve flags on socket fd");
   if ((fcntl(fd, F_SETFL, flags | O_NONBLOCK)) < 0)
     die("failed to set tcp socket as nonblocking");
 }
 
-int sock_bind() {
+int sock_bind(void) {
   int sockfd = socket(AF_INET, SOCK_STREAM, 0);
   sock_set_nonblock(sockfd);
 
@@ -294,9 +302,9 @@ int sock_bind() {
                              .sin_family = AF_INET,
                              .sin_zero = {0}};
   if (bind(sockfd, (struct sockaddr *)&addr, sizeof(addr)))
-    die("failed to bind socket to port\n");
+    die("failed to bind socket to port");
   if (listen(sockfd, MAX_QUEUED_REQUESTS))
-    die("failed to begin listening on port\n");
+    die("failed to begin listening on port");
 
 #ifndef QUIET
   printf("   \033[0;36m[web]\033[0m :: starting server on port %d\n", PORT);
@@ -318,9 +326,13 @@ void *handle_conn(handle_args_t *args) {
 
   const char *prefix = "GET /";
   char buf[REQUEST_BUFFER] = {0};
-  if (read(fd, buf, REQUEST_BUFFER) < 0) die("failed to read from socket");
 
-  if (memcmp(&buf, prefix, strlen(prefix))) return NULL;
+  int len = read(fd, buf, sizeof(buf));
+  printf("FILE DESCRIPTOR %d, ERRNO %d\n", fd, errno);
+  if (len == -1 && errno != EAGAIN) die("failed to read from socket");
+  if (len == 0) return NULL;
+
+  if (memcmp(buf, prefix, strlen(prefix))) return NULL;
 
   string_t alias = string_new();
   for (int i = strlen(prefix); i < REQUEST_BUFFER; i++) {
@@ -355,15 +367,15 @@ void *handle_conn(handle_args_t *args) {
 END_SOCK:
   string_dealloc(&res);
   string_dealloc(&alias);
-  close(fd);
 
   return NULL;
 }
 
-int main() {
+int main(void) {
   int sfd = sock_bind();
   int ifd = config_initialize_inotify();
-  int epfd = epoll_create(1);
+  int epfd = epoll_create1(O_CLOEXEC);
+  if (epfd < 0) die("failed to create epoll instance");
 
   struct epoll_event listen_ev = {.data.fd = sfd, .events = EPOLLIN | EPOLLET};
   struct epoll_event inotify_ev = {.data.fd = ifd, .events = EPOLLIN | EPOLLET};
@@ -374,8 +386,8 @@ int main() {
     die("failed to add socket fd to epoll interest list");
 
   struct inotify_event *last_inotif_ev =
-      (struct inotify_event *)malloc(sizeof(struct inotify_event));
-  struct epoll_event *events = calloc(MAX_EVENTS, sizeof(struct epoll_event));
+      (struct inotify_event *)xmalloc(sizeof(struct inotify_event));
+  struct epoll_event *events = xcalloc(MAX_EVENTS, sizeof(struct epoll_event));
   thread_pool_t *pool = thread_pool_new(THREADS, JOBS);
   config_t config = config_parse();
 
@@ -415,7 +427,10 @@ int main() {
         }
       } else {
         handle_args_t arg = {.fd = event.data.fd, .config = &config};
+
         thread_pool_dispatch(pool, (void *)handle_conn, &arg);
+        epoll_ctl(epfd, EPOLL_CTL_DEL, arg.fd, NULL);
+        close(arg.fd);
       }
     }
   }
