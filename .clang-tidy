@@ -1,1 +1,1 @@
-Checks: 'clang-analyzer-*,performance-*,readability-*,concurrency-*,-readability-braces-around-statements'
+Checks: 'clang-analyzer-*,performance-*,readability-*,concurrency-*,-readability-braces-around-statements,-clang-analyzer-security.insecureAPI.DeprecatedOrUnsafeBufferHandling'

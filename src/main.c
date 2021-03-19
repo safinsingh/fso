@@ -41,10 +41,15 @@
 #define CONFIG_FILE "config.fso"
 #define INITIAL_STRING_CAPACITY 32
 
-void die(char *msg) {
-  fprintf(stderr, " \033[0;31m[fatal]\033[0m :: %s\n            error: %s\n", msg, strerror(errno));
-  exit(EXIT_FAILURE);
-}
+#define web(fmt, ...) printf("   \033[0;36m[web]\033[0m :: " fmt "\n", ##__VA_ARGS__);
+#define config(fmt, ...) printf("\033[0;32m[config]\033[0m :: " fmt "\n", ##__VA_ARGS__);
+#define reload(fmt, ...) printf("\033[0;35m[reload]\033[0m :: " fmt "\n", ##__VA_ARGS__);
+#define die(fmt, ...)                                                                \
+  do {                                                                               \
+    fprintf(stderr, " \033[0;31m[fatal]\033[0m :: " fmt "\n            errno: %s\n", \
+            ##__VA_ARGS__, strerror(errno));                                         \
+    exit(EXIT_FAILURE);                                                              \
+  } while (0)
 
 void *xmalloc(size_t size) {
   void *ret = malloc(size);
@@ -58,23 +63,34 @@ void *xcalloc(size_t els, size_t size) {
   return ret;
 }
 
+void *xrealloc(void *ptr, size_t size) {
+  void *ret = realloc(ptr, size);
+  if (!ret) die("failed to reallocate with recalloc");
+  return ret;
+}
+
+void *xmemcpy(void *dest, const void *src, size_t len) {
+  void *ret = memcpy(dest, src, len);
+  if (!ret) die("failed to memcpy");
+  return ret;
+}
+
 typedef struct String {
   char *ptr;
   int len;
   int cap;
 } string_t;
 
-string_t string_new() {
+string_t string_new(void) {
   static int cap = INITIAL_STRING_CAPACITY;
   char *ptr = xcalloc(cap, sizeof(*ptr));
-  if (!ptr) die("failed to allocate string");
 
   return (string_t){ .ptr = ptr, .len = 0, .cap = cap };
 }
 
 void _string_realloc(string_t *string) {
   int cap = string->cap * 2;
-  char *ptr = realloc(string->ptr, cap * sizeof(char));
+  char *ptr = xrealloc(string->ptr, cap * sizeof(*ptr));
 
   string->cap = cap;
   string->ptr = ptr;
@@ -92,11 +108,16 @@ void string_dealloc(string_t *string) {
   free(string->ptr);
 }
 
-static string_t string_from(char *ptr) {
-  string_t str = string_new();
-  for (char *s = ptr; *s != '\0'; s++)
-    string_push(&str, *s);
-  return str;
+string_t string_from(char *ptr) {
+  int len = strlen(ptr);
+
+  int pow = 1;
+  while ((1 << pow) < len)
+    pow++;
+  int cap = 1 << pow;
+
+  char *dup = xcalloc(cap, sizeof(*dup));
+  return (string_t){ .ptr = xmemcpy(dup, ptr, len), .len = len, .cap = cap };
 }
 
 void string_push_str(string_t *string, const char *ptr, int len) {
@@ -136,8 +157,8 @@ thread_pool_t *thread_pool_new(int threads_len, int jobs_cap) {
   pool->jobs_len = 0;
   pool->jobs_tail = jobs_cap - 1;
 
-  pool->threads = (pthread_t *)xmalloc(threads_len * sizeof(pthread_t));
-  pool->jobs = (job_t *)xmalloc(jobs_cap * sizeof(job_t));
+  pool->threads = xmalloc(threads_len * sizeof(*pool->threads));
+  pool->jobs = xmalloc(jobs_cap * sizeof(*pool->jobs));
 
   for (int t = 0; t < threads_len; t++) {
     if (pthread_create(&pool->threads[t], NULL, thread_init, pool)) die("failed to create thread");
@@ -218,8 +239,7 @@ typedef struct Config {
 void config_print(config_t *config) {
   link_t *link = config->head;
   while (link->next) {
-    printf("\033[0;32m[config]\033[0m :: alias '%s' points to '%s'\n", link->alias.ptr,
-           link->to.ptr);
+    config("alias '%s' points to '%s'", link->alias.ptr, link->to.ptr);
     link = link->next;
   }
 }
@@ -283,18 +303,19 @@ config_t *config_parse(void) {
 
 int config_initialize_inotify(void) {
   int ifd = inotify_init1(IN_NONBLOCK);
-  if (ifd < 0) die("failed to initialize an inotify instance");
+  if (ifd < 0) die("failed to initialize an inotify instance, does `config.fso` exist?");
 
   int wd = inotify_add_watch(ifd, CONFIG_FILE, IN_CLOSE_WRITE);
-  if (wd < 0) die("failed to add watch to inotify instance");
+  if (wd < 0) die("failed to add watch on config file to inotify instance");
 
   return ifd;
 }
 
 void sock_set_nonblock(int fd) {
   int flags = fcntl(fd, F_GETFL);
-  if (flags < 0) die("failed to retrieve flags on socket fd");
-  if ((fcntl(fd, F_SETFL, flags | O_NONBLOCK)) < 0) die("failed to set tcp socket as nonblocking");
+  if (flags < 0) die("failed to retrieve flags on socket with fd %d", fd);
+  if ((fcntl(fd, F_SETFL, flags | O_NONBLOCK)) < 0)
+    die("failed to set socket pointed to by fd %d as nonblocking", fd);
 }
 
 int sock_bind(void) {
@@ -310,10 +331,11 @@ int sock_bind(void) {
                               .sin_family = AF_INET,
                               .sin_zero = { 0 } };
 
-  if (bind(sockfd, (struct sockaddr *)&addr, sizeof(addr))) die("failed to bind socket to port");
-  if (listen(sockfd, SOMAXCONN)) die("failed to begin listening on port");
+  if (bind(sockfd, (struct sockaddr *)&addr, sizeof(addr)))
+    die("failed to bind socket to port %d", PORT);
+  if (listen(sockfd, SOMAXCONN)) die("failed to begin listening on port %d", PORT);
 
-  printf("   \033[0;36m[web]\033[0m :: starting server on port %d\n", PORT);
+  web("starting server on port %d", PORT);
   return sockfd;
 }
 
@@ -324,8 +346,8 @@ void *handle_conn(int const *fd, config_t *config) {
   for (;;) {
     int len = read(*fd, &buf[bytes], REQUEST_BUFFER - bytes);
     if (len == -1) {
-      if (errno == EAGAIN) break;
-      die("failed to read socket");
+      if (errno == EAGAIN) continue;
+      die("failed to read socket fd %d", *fd);
     } else if (len == 0) {
       break;
     } else {
@@ -337,7 +359,7 @@ void *handle_conn(int const *fd, config_t *config) {
   char prefix[] = "GET /";
   if (memcmp(buf, prefix, strlen(prefix))) {
     char err[] = "HTTP/1.1 404 Not Found\r\n\r\nInvalid route!";
-    if (write(*fd, err, strlen(err)) < 0) die("failed to write to socket");
+    if (write(*fd, err, strlen(err)) < 0) die("failed to write to socket fd %d", *fd);
     goto END;
   }
 
@@ -356,7 +378,7 @@ void *handle_conn(int const *fd, config_t *config) {
 
   if (!redirect) {
     char err[] = "HTTP/1.1 404 Not Found\r\n\r\nInvalid route!";
-    if (write(*fd, err, strlen(err)) < 0) die("failed to write to socket");
+    if (write(*fd, err, strlen(err)) < 0) die("failed to write to socket fd %d", *fd);
 
     goto END;
   }
@@ -365,11 +387,11 @@ void *handle_conn(int const *fd, config_t *config) {
   string_push_str(&res, redirect->ptr, redirect->len);
   string_push_str(&res, "\r\n", 2);
 
-  if (write(*fd, res.ptr, res.len) < 0) die("failed to write to socket");
+  if (write(*fd, res.ptr, res.len) < 0) die("failed to write to socket fd %d", *fd);
   string_dealloc(&res);
 
 END:
-  printf("   \033[0;36m[web]\033[0m :: handled conn on sockfd %d\n", *fd);
+  web("handled conn on sockfd %d", *fd);
   close(*fd);
   return NULL;
 }
@@ -398,7 +420,7 @@ int main(void) {
 
   for (;;) {
     int evs = epoll_wait(epfd, events, MAX_EVENTS, -1);
-    if (evs < 0) die("epoll wait failedtt");
+    if (evs < 0) die("epoll wait failed");
 
     for (int e = 0; e < evs; e++) {
       struct epoll_event event = events[e];
@@ -407,40 +429,30 @@ int main(void) {
         continue;
       }
       if (event.data.fd == sfd) {
-        for (;;) {
-          int newfd = accept(sfd, NULL, NULL);
-          if (newfd == -1) {
-            if (errno == EAGAIN) break;
-            die("failed to accept connection");
-          }
-
-          sock_set_nonblock(newfd);
+        int newfd;
+        while ((newfd = accept4(sfd, NULL, NULL, SOCK_NONBLOCK)) != -1) {
           struct epoll_event accepted_ev = { .data.fd = newfd, .events = EPOLLIN | EPOLLET };
           if (epoll_ctl(epfd, EPOLL_CTL_ADD, newfd, &accepted_ev)) {
-            die("failed to add connection fd to epoll interest list");
+            die("failed to add connection fd %d to epoll interest list", newfd);
           } else {
-            printf(
-                "   \033[0;36m[web]\033[0m :: got ev, awaiting conn on sockfd "
-                "%d\n",
-                newfd);
+            web("got ev, awaiting conn on sockfd %d", newfd);
           }
         }
+        if (errno != EAGAIN) die("failed to accept conn");
       } else if (event.data.fd == ifd) {
         int len = read(ifd, last_inotif_ev, sizeof(last_inotif_ev));
         if (len == -1 && errno != EAGAIN) die("failed to read from inotify fd");
         if (len <= 0) continue;
 
         if (last_inotif_ev->mask & IN_CLOSE_WRITE) {
-          printf(
-              "\033[0;35m[config]\033[0m :: detected config file change! "
-              "reloading...\n");
+          reload("detected config file change! reloading...");
 
           pthread_mutex_lock(&config_mux);
           config_dealloc(config);
           config = config_parse();
           pthread_mutex_unlock(&config_mux);
 
-          printf("\033[0;35m[config]\033[0m :: reloaded successfully!\n");
+          reload("reloaded successfully!");
         }
       } else {
         // attempt lock to wait for config reloading to finish
