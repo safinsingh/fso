@@ -91,7 +91,8 @@ char *xstrtok_r(char *str, char *delim, char **save_ptr) {
 }
 
 typedef struct String {
-  fat_char slice;
+  char *ptr;
+  int len;
   int cap;
 } string_t;
 
@@ -99,25 +100,25 @@ string_t string_new(void) {
   static int cap = INITIAL_STRING_CAPACITY;
   char *ptr = xcalloc(cap, sizeof(*ptr));
 
-  return (string_t){ .slice = { .data = ptr, .len = 0 }, .cap = cap };
+  return (string_t){ .ptr = ptr, .len = 0, .cap = cap };
 }
 
 void _string_realloc(string_t *string) {
   int cap = string->cap * 2;
-  char *ptr = xrealloc(string->slice.data, cap * sizeof(*ptr));
+  char *ptr = xrealloc(string->ptr, cap * sizeof(*ptr));
 
   string->cap = cap;
-  string->slice.data = ptr;
+  string->ptr = ptr;
 }
 
 void string_push(string_t *string, char ch) {
-  if (string->slice.len + 1 == string->cap) _string_realloc(string);
-  string->slice.data[string->slice.len] = ch;
-  string->slice.len++;
+  if (string->len + 1 == string->cap) _string_realloc(string);
+  string->ptr[string->len] = ch;
+  string->len++;
 }
 
 void string_dealloc(string_t *string) {
-  free(string->slice.data);
+  free(string->ptr);
 }
 
 string_t string_from(char *ptr) {
@@ -128,7 +129,7 @@ string_t string_from(char *ptr) {
   int cap = 1 << pow;
 
   char *dup = xcalloc(cap, sizeof(*dup));
-  return (string_t){ .slice = { .data = xmemcpy(dup, ptr, len), .len = len }, .cap = cap };
+  return (string_t){ .ptr = xmemcpy(dup, ptr, len), .len = len, .cap = cap };
 }
 
 void string_push_str(string_t *string, char *ptr, int len) {
@@ -243,7 +244,7 @@ config_t *config;
 void config_print(config_t *config) {
   link_t *link = config->head;
   while (link->next) {
-    config("alias '%s' points to '%s'", link->alias.slice.data, link->to.slice.data);
+    config("alias '%s' points to '%s'", link->alias.ptr, link->to.ptr);
     link = link->next;
   }
 }
@@ -251,7 +252,7 @@ void config_print(config_t *config) {
 string_t *config_get(config_t *config, char *alias) {
   link_t *link = config->head;
   while (link->next) {
-    if (strcmp(link->alias.slice.data, alias)) {
+    if (strcmp(link->alias.ptr, alias)) {
       link = link->next;
     } else {
       return &link->to;
@@ -394,10 +395,10 @@ void handle_conn(handler_args_t *args) {
 
   string_t res = string_from("HTTP/1.1 307 Temporary Redirect\r\nLocation: ");
 
-  string_push_str(&res, redirect->slice.data, redirect->slice.len);
+  string_push_str(&res, redirect->ptr, redirect->len);
   string_push_str(&res, "\r\n", 2);
 
-  xsock_write(args->fd, res.slice.data);
+  xsock_write(args->fd, res.ptr);
   string_dealloc(&res);
   close(args->fd);
 }
