@@ -32,14 +32,16 @@
 #include <sys/socket.h>
 #include <unistd.h>
 
-#define PORT 5012
-#define JOBS 128
-#define THREADS 8
-#define MAX_EVENTS 512
-#define REQUEST_BUFFER 32
-#define INOTIFY_BUF_LEN 512
-#define CONFIG_FILE "config.fso"
+#define PORT 3107
 #define INITIAL_STRING_CAPACITY 32
+
+#define THREAD_POOL_QUEUE_LEN 128
+#define THREAD_POOL_THREADS 8
+
+#define EPOLL_MAX_EVENTS 512
+#define HTTP_REQUEST_BUFFER 128
+
+#define CONFIG_FILE "config.fso"
 
 #define web(fmt, ...) printf("   \033[0;36m[web]\033[0m :: " fmt "\n", ##__VA_ARGS__);
 #define config(fmt, ...) printf("\033[0;32m[config]\033[0m :: " fmt "\n", ##__VA_ARGS__);
@@ -50,6 +52,13 @@
             ##__VA_ARGS__, strerror(errno));                                         \
     exit(EXIT_FAILURE);                                                              \
   } while (0)
+#define fat_ptr_impl(T) \
+  typedef struct {      \
+    T *data;            \
+    int len;            \
+  } fat_##T;
+
+fat_ptr_impl(char);
 
 void *xmalloc(size_t size) {
   void *ret = malloc(size);
@@ -75,9 +84,14 @@ void *xmemcpy(void *dest, const void *src, size_t len) {
   return ret;
 }
 
+char *xstrtok_r(char *str, char *delim, char **save_ptr) {
+  char *tok = strtok_r(str, delim, save_ptr);
+  if (!tok) die("failed to strtok");
+  return tok;
+}
+
 typedef struct String {
-  char *ptr;
-  int len;
+  fat_char slice;
   int cap;
 } string_t;
 
@@ -85,50 +99,45 @@ string_t string_new(void) {
   static int cap = INITIAL_STRING_CAPACITY;
   char *ptr = xcalloc(cap, sizeof(*ptr));
 
-  return (string_t){ .ptr = ptr, .len = 0, .cap = cap };
+  return (string_t){ .slice = { .data = ptr, .len = 0 }, .cap = cap };
 }
 
 void _string_realloc(string_t *string) {
   int cap = string->cap * 2;
-  char *ptr = xrealloc(string->ptr, cap * sizeof(*ptr));
+  char *ptr = xrealloc(string->slice.data, cap * sizeof(*ptr));
 
   string->cap = cap;
-  string->ptr = ptr;
+  string->slice.data = ptr;
 }
 
 void string_push(string_t *string, char ch) {
-  if (string->len + 1 == string->cap) _string_realloc(string);
-  string->ptr[string->len] = ch;
-  string->len++;
+  if (string->slice.len + 1 == string->cap) _string_realloc(string);
+  string->slice.data[string->slice.len] = ch;
+  string->slice.len++;
 }
 
 void string_dealloc(string_t *string) {
-  string->cap = 0;
-  string->len = 0;
-  free(string->ptr);
+  free(string->slice.data);
 }
 
 string_t string_from(char *ptr) {
   int len = strlen(ptr);
 
   int pow = 1;
-  while ((1 << pow) < len)
-    pow++;
+  while ((1 << pow) < len) pow++;
   int cap = 1 << pow;
 
   char *dup = xcalloc(cap, sizeof(*dup));
-  return (string_t){ .ptr = xmemcpy(dup, ptr, len), .len = len, .cap = cap };
+  return (string_t){ .slice = { .data = xmemcpy(dup, ptr, len), .len = len }, .cap = cap };
 }
 
-void string_push_str(string_t *string, const char *ptr, int len) {
-  for (int i = 0; i < len; i++)
-    string_push(string, ptr[i]);
+void string_push_str(string_t *string, char *ptr, int len) {
+  for (int i = 0; i < len; i++) string_push(string, ptr[i]);
 }
 
 typedef struct Job {
-  void (*fn)(void *, void *);
-  void *arg1;
-  void *arg2;
+  void (*fn)(void *);
+  void *arg;
 } job_t;
 
 typedef struct ThreadPool {
@@ -145,9 +154,7 @@ typedef struct ThreadPool {
 } thread_pool_t;
 
 static void *thread_init(void *arg);
-thread_pool_t *thread_pool_new(int threads_len, int jobs_cap) {
-  thread_pool_t *pool = xmalloc(sizeof(*pool));
-
+void thread_pool_init(thread_pool_t *pool, int threads_len, int jobs_cap) {
   if (pthread_mutex_init(&pool->job_lock, NULL)) die("failed to initialize thread pool job mutex");
   if (pthread_cond_init(&pool->job_notify, NULL))
     die("failed to initialize thread pool job condvar");
@@ -164,8 +171,6 @@ thread_pool_t *thread_pool_new(int threads_len, int jobs_cap) {
     if (pthread_create(&pool->threads[t], NULL, thread_init, pool)) die("failed to create thread");
     pool->threads_len++;
   }
-
-  return pool;
 }
 
 job_t thread_pool_dequeue(thread_pool_t *pool) {
@@ -186,26 +191,23 @@ void *thread_init(void *arg) {
 
   for (;;) {
     pthread_mutex_lock(&pool->job_lock);
-    while (pool->jobs_len == 0)
-      pthread_cond_wait(&pool->job_notify, &pool->job_lock);
+    while (pool->jobs_len == 0) pthread_cond_wait(&pool->job_notify, &pool->job_lock);
 
     job_t job = thread_pool_dequeue(pool);
     pthread_mutex_unlock(&pool->job_lock);
 
-    job.fn(job.arg1, job.arg2);
+    (*job.fn)(job.arg);
   }
 
-  pthread_exit(0);
+  pthread_exit(EXIT_SUCCESS);
   return NULL;
 }
 
-typedef struct Config config_t;
-
-void thread_pool_dispatch(thread_pool_t *pool, void (*fn)(void *, void *), void *arg1, void *arg2) {
+void thread_pool_dispatch(thread_pool_t *pool, void (*fn)(void *), void *arg) {
   pthread_mutex_lock(&pool->job_lock);
   if (pool->jobs_cap == pool->jobs_len) die("thread pool job queue full");
 
-  thread_pool_enqueue(pool, (job_t){ .fn = fn, .arg1 = arg1, .arg2 = arg2 });
+  thread_pool_enqueue(pool, (job_t){ .fn = fn, .arg = arg });
 
   if (pthread_cond_signal(&pool->job_notify)) die("failed to wake up threads with condvar");
   pthread_mutex_unlock(&pool->job_lock);
@@ -227,8 +229,7 @@ link_t *new_link_entry(void) {
 
 link_t *last_link_entry(link_t *head) {
   link_t *link = head;
-  while (link->next)
-    link = link->next;
+  while (link->next) link = link->next;
   return link;
 }
 
@@ -236,18 +237,21 @@ typedef struct Config {
   link_t *head;
 } config_t;
 
+pthread_mutex_t config_mux = PTHREAD_MUTEX_INITIALIZER;
+config_t *config;
+
 void config_print(config_t *config) {
   link_t *link = config->head;
   while (link->next) {
-    config("alias '%s' points to '%s'", link->alias.ptr, link->to.ptr);
+    config("alias '%s' points to '%s'", link->alias.slice.data, link->to.slice.data);
     link = link->next;
   }
 }
 
-string_t *config_get(config_t *config, string_t alias) {
+string_t *config_get(config_t *config, char *alias) {
   link_t *link = config->head;
   while (link->next) {
-    if (strncmp(link->alias.ptr, alias.ptr, alias.len)) {
+    if (strcmp(link->alias.slice.data, alias)) {
       link = link->next;
     } else {
       return &link->to;
@@ -290,8 +294,9 @@ config_t *config_parse(void) {
       if (c == '\n') {
         state = KEY;
         last_link_entry(config->head)->next = new_link_entry();
-      } else
+      } else {
         string_push(&last_link_entry(config->head)->to, c);
+      }
     }
   }
 
@@ -319,9 +324,9 @@ void sock_set_nonblock(int fd) {
 }
 
 int sock_bind(void) {
-  static int yes = 1;
-
   int sockfd = socket(AF_INET, SOCK_STREAM, 0);
+
+  static int yes = 1;
   if (setsockopt(sockfd, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(yes)))
     die("failed to set SO_REUSEADDR on socket");
   sock_set_nonblock(sockfd);
@@ -339,61 +344,62 @@ int sock_bind(void) {
   return sockfd;
 }
 
-void *handle_conn(int const *fd, config_t *config) {
-  char buf[REQUEST_BUFFER] = { 0 };
-  int bytes = 0;
+void xsock_write(int fd, char *msg) {
+  if (write(fd, msg, strlen(msg)) < 0) {
+    die("failed to write to socket fd %d", fd);
+  }
+}
 
-  for (;;) {
-    int len = read(*fd, &buf[bytes], REQUEST_BUFFER - bytes);
-    if (len == -1) {
-      if (errno == EAGAIN) continue;
-      die("failed to read socket fd %d", *fd);
-    } else if (len == 0) {
-      break;
-    } else {
-      bytes += len;
-      if (bytes == REQUEST_BUFFER) break;
+typedef struct Request {
+  char *method;
+  char *path;
+} http_request_t;
+
+http_request_t http_request_parse(char *buf) {
+  http_request_t req;
+
+  req.method = xstrtok_r(buf, " ", &buf);
+  req.path = xstrtok_r(NULL, " ", &buf);
+
+  return req;
+}
+
+typedef struct HandlerArgs {
+  int fd;
+} handler_args_t;
+
+void handle_conn(handler_args_t *args) {
+  char buf[HTTP_REQUEST_BUFFER] = { 0 };
+
+  int len = read(args->fd, buf, HTTP_REQUEST_BUFFER);
+  if (len == -1) {
+    if (errno == EAGAIN) {
+      return;
     }
+    die("failed to read socket fd %d", args->fd);
   }
 
-  char prefix[] = "GET /";
-  if (memcmp(buf, prefix, strlen(prefix))) {
-    char err[] = "HTTP/1.1 404 Not Found\r\n\r\nInvalid route!";
-    if (write(*fd, err, strlen(err)) < 0) die("failed to write to socket fd %d", *fd);
-    goto END;
+  http_request_t req = http_request_parse(buf);
+
+  if (strcmp(req.method, "GET")) {
+    xsock_write(args->fd, "HTTP/1.1 404 Not Found\r\n\r\nInvalid route!");
+    return;
   }
 
-  string_t alias = string_new();
-  for (int i = strlen(prefix); i < REQUEST_BUFFER; i++) {
-    char a = buf[i];
-    if (a != ' ') string_push(&alias, a);
-    else {
-      if (alias.len == 0) string_push(&alias, '@');
-      break;
-    }
-  }
-
-  string_t *redirect = config_get(config, alias);
-  string_dealloc(&alias);
-
+  string_t *redirect = config_get(config, req.path);
   if (!redirect) {
-    char err[] = "HTTP/1.1 404 Not Found\r\n\r\nInvalid route!";
-    if (write(*fd, err, strlen(err)) < 0) die("failed to write to socket fd %d", *fd);
-
-    goto END;
+    xsock_write(args->fd, "HTTP/1.1 404 Not Found\r\n\r\nInvalid route!");
+    return;
   }
 
   string_t res = string_from("HTTP/1.1 307 Temporary Redirect\r\nLocation: ");
-  string_push_str(&res, redirect->ptr, redirect->len);
+
+  string_push_str(&res, redirect->slice.data, redirect->slice.len);
   string_push_str(&res, "\r\n", 2);
 
-  if (write(*fd, res.ptr, res.len) < 0) die("failed to write to socket fd %d", *fd);
+  xsock_write(args->fd, res.slice.data);
   string_dealloc(&res);
-
-END:
-  web("handled conn on sockfd %d", *fd);
-  close(*fd);
-  return NULL;
+  close(args->fd);
 }
 
 int main(void) {
@@ -410,41 +416,37 @@ int main(void) {
   if (epoll_ctl(epfd, EPOLL_CTL_ADD, sfd, &listen_ev))
     die("failed to add socket fd to epoll interest list");
 
-  struct inotify_event last_inotif_ev[1];
-  struct epoll_event events[MAX_EVENTS];
-  thread_pool_t *pool = thread_pool_new(THREADS, JOBS);
+  struct inotify_event last_inotif_ev;
+  struct epoll_event events[EPOLL_MAX_EVENTS];
 
-  config_t *config = config_parse();
-  pthread_mutex_t config_mux;
-  pthread_mutex_init(&config_mux, NULL);
+  thread_pool_t pool;
+  thread_pool_init(&pool, THREAD_POOL_THREADS, THREAD_POOL_QUEUE_LEN);
+
+  config = config_parse();
 
   for (;;) {
-    int evs = epoll_wait(epfd, events, MAX_EVENTS, -1);
+    int evs = epoll_wait(epfd, events, EPOLL_MAX_EVENTS, -1);
     if (evs < 0) die("epoll wait failed");
 
     for (int e = 0; e < evs; e++) {
       struct epoll_event event = events[e];
-      if ((event.events & EPOLLERR) || (event.events & EPOLLHUP) || (!(event.events & EPOLLIN))) {
-        close(event.data.fd);
-        continue;
-      }
+      if ((event.events & EPOLLERR) || (event.events & EPOLLHUP)) die("epoll err/hup");
       if (event.data.fd == sfd) {
         int newfd;
         while ((newfd = accept4(sfd, NULL, NULL, SOCK_NONBLOCK)) != -1) {
           struct epoll_event accepted_ev = { .data.fd = newfd, .events = EPOLLIN | EPOLLET };
           if (epoll_ctl(epfd, EPOLL_CTL_ADD, newfd, &accepted_ev)) {
-            die("failed to add connection fd %d to epoll interest list", newfd);
-          } else {
-            web("got ev, awaiting conn on sockfd %d", newfd);
+            die("failed to add fd %d to epoll interest list", newfd);
           }
         }
-        if (errno != EAGAIN) die("failed to accept conn");
       } else if (event.data.fd == ifd) {
-        int len = read(ifd, last_inotif_ev, sizeof(last_inotif_ev));
-        if (len == -1 && errno != EAGAIN) die("failed to read from inotify fd");
-        if (len <= 0) continue;
+        int len = read(ifd, &last_inotif_ev, sizeof(last_inotif_ev));
+        if (len == -1) {
+          if (errno == EAGAIN) continue;
+          die("failed to read from inotify fd");
+        };
 
-        if (last_inotif_ev->mask & IN_CLOSE_WRITE) {
+        if (last_inotif_ev.mask & IN_CLOSE_WRITE) {
           reload("detected config file change! reloading...");
 
           pthread_mutex_lock(&config_mux);
@@ -455,12 +457,8 @@ int main(void) {
           reload("reloaded successfully!");
         }
       } else {
-        // attempt lock to wait for config reloading to finish
-        pthread_mutex_lock(&config_mux);
-        // unlock immediately
-        pthread_mutex_unlock(&config_mux);
-
-        thread_pool_dispatch(pool, (void *)handle_conn, &event.data.fd, config);
+        handler_args_t args = { .fd = event.data.fd };
+        thread_pool_dispatch(&pool, (void *)&handle_conn, &args);
       }
     }
   }

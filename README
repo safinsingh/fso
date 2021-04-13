@@ -4,8 +4,8 @@ fso - fast [link] shortener
 fso is a fast implementation of a link shortener. you can configure your links like so in a `config.fso` file like so:
 
 ```
-@     :  https://safin.dev
-test  :  https://google.com
+/      :  https://safin.dev
+/test  :  https://google.com
 ```
 
 then, build with:
