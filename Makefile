@@ -1,6 +1,6 @@
 .PHONY: test
 
-CFLAGS = -std=c11 -pthread -Wall -Werror
+CFLAGS = -std=c99 -pthread -Wall -Werror
 SOURCES = ./src/main.c
 TARGET = ./bin/fso
 DEFAULT_GOAL = dev
