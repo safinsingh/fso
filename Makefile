@@ -4,7 +4,7 @@ CFLAGS = -std=c99 -pthread -Wall -Werror
 SOURCES = ./src/main.c
 TARGET = ./bin/fso
 DEFAULT_GOAL = dev
-CC = clang
+CC = gcc
 
 main:
 	$(CC) -o $(TARGET) $(CFLAGS) -g $(SOURCES)

@@ -26,7 +26,7 @@ todo:
 
 developing:
 
-you can run `make dev` to build a development release with debugging symbols. note that the `prod` goal will apply the `O2` flag to gcc, while `dev` will not.
+you can run `make dev` to build a development release with debugging symbols. note that the `prod` goal will apply the `O2` flag to $CC, while `dev` will not.
 
 limitations:
 - only works on linux due to use of linux-specific syscalls
