@@ -10,7 +10,7 @@ main:
 	$(CC) -o $(TARGET) $(CFLAGS) -g $(SOURCES)
 
 prod:
-	$(CC) -o $(TARGET)  $(CFLAGS) -O2 $(SOURCES)
+	$(CC) -o $(TARGET)  $(CFLAGS) -O2 -DPROD $(SOURCES)
 
 test:
 	deno run --allow-net test/index.ts

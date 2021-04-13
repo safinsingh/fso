@@ -16,7 +16,6 @@
   along with this program.  If not, see <https://www.gnu.org/licenses/>.
 */
 
-#define _GNU_SOURCE
 #define _POSIX_C_SOURCE 200809L
 
 #include <errno.h>
@@ -43,22 +42,15 @@
 
 #define CONFIG_FILE "config.fso"
 
-#define web(fmt, ...) printf("   \033[0;36m[web]\033[0m :: " fmt "\n", ##__VA_ARGS__);
-#define config(fmt, ...) printf("\033[0;32m[config]\033[0m :: " fmt "\n", ##__VA_ARGS__);
-#define reload(fmt, ...) printf("\033[0;35m[reload]\033[0m :: " fmt "\n", ##__VA_ARGS__);
+#define web(fmt, ...) printf("   \033[0;36m[web]\033[0m " fmt "\n", ##__VA_ARGS__);
+#define config(fmt, ...) printf("\033[0;32m[config]\033[0m " fmt "\n", ##__VA_ARGS__);
+#define reload(fmt, ...) printf("\033[0;35m[reload]\033[0m " fmt "\n", ##__VA_ARGS__);
 #define die(fmt, ...)                                                                \
   do {                                                                               \
     fprintf(stderr, " \033[0;31m[fatal]\033[0m :: " fmt "\n            errno: %s\n", \
             ##__VA_ARGS__, strerror(errno));                                         \
     exit(EXIT_FAILURE);                                                              \
   } while (0)
-#define fat_ptr_impl(T) \
-  typedef struct {      \
-    T *data;            \
-    int len;            \
-  } fat_##T;
-
-fat_ptr_impl(char);
 
 void *xmalloc(size_t size) {
   void *ret = malloc(size);
@@ -142,11 +134,11 @@ typedef struct Job {
 } job_t;
 
 typedef struct ThreadPool {
-  pthread_mutex_t job_lock;
+  pthread_mutex_t job_notify_lock;
   pthread_cond_t job_notify;
   pthread_t *threads;
-  int threads_len;
 
+  pthread_mutex_t job_lock;
   job_t *jobs;
   int jobs_cap;
   int jobs_len;
@@ -154,9 +146,11 @@ typedef struct ThreadPool {
   int jobs_tail;
 } thread_pool_t;
 
-static void *thread_init(void *arg);
+void *thread_init(void *arg);
 void thread_pool_init(thread_pool_t *pool, int threads_len, int jobs_cap) {
   if (pthread_mutex_init(&pool->job_lock, NULL)) die("failed to initialize thread pool job mutex");
+  if (pthread_mutex_init(&pool->job_notify_lock, NULL))
+    die("failed to initialize thread pool condvar mutex");
   if (pthread_cond_init(&pool->job_notify, NULL))
     die("failed to initialize thread pool job condvar");
 
@@ -170,7 +164,6 @@ void thread_pool_init(thread_pool_t *pool, int threads_len, int jobs_cap) {
 
   for (int t = 0; t < threads_len; t++) {
     if (pthread_create(&pool->threads[t], NULL, thread_init, pool)) die("failed to create thread");
-    pool->threads_len++;
   }
 }
 
@@ -182,6 +175,7 @@ job_t thread_pool_dequeue(thread_pool_t *pool) {
 }
 
 void thread_pool_enqueue(thread_pool_t *pool, job_t job) {
+  if (pool->jobs_cap == pool->jobs_len) die("thread pool job queue full");
   pool->jobs_tail = (pool->jobs_tail + 1) % pool->jobs_cap;
   pool->jobs[pool->jobs_tail] = job;
   pool->jobs_len += 1;
@@ -191,9 +185,11 @@ void *thread_init(void *arg) {
   thread_pool_t *pool = (thread_pool_t *)arg;
 
   for (;;) {
-    pthread_mutex_lock(&pool->job_lock);
-    while (pool->jobs_len == 0) pthread_cond_wait(&pool->job_notify, &pool->job_lock);
+    pthread_mutex_lock(&pool->job_notify_lock);
+    while (pool->jobs_len == 0) pthread_cond_wait(&pool->job_notify, &pool->job_notify_lock);
+    pthread_mutex_unlock(&pool->job_notify_lock);
 
+    pthread_mutex_lock(&pool->job_lock);
     job_t job = thread_pool_dequeue(pool);
     pthread_mutex_unlock(&pool->job_lock);
 
@@ -206,12 +202,10 @@ void *thread_init(void *arg) {
 
 void thread_pool_dispatch(thread_pool_t *pool, void (*fn)(void *), void *arg) {
   pthread_mutex_lock(&pool->job_lock);
-  if (pool->jobs_cap == pool->jobs_len) die("thread pool job queue full");
-
   thread_pool_enqueue(pool, (job_t){ .fn = fn, .arg = arg });
+  pthread_mutex_unlock(&pool->job_lock);
 
   if (pthread_cond_signal(&pool->job_notify)) die("failed to wake up threads with condvar");
-  pthread_mutex_unlock(&pool->job_lock);
 }
 
 typedef struct Link {
@@ -284,7 +278,7 @@ config_t *config_parse(void) {
   config_t *config = xmalloc(sizeof(*config));
   config->head = new_link_entry();
 
-  int c;
+  char c;
   while ((c = fgetc(fp)) != EOF) {
     if (c == ' ' || c == '\t' || c == '\v' || c == '\r' || c == '\f') continue;
     if (state == KEY) {
@@ -301,7 +295,9 @@ config_t *config_parse(void) {
     }
   }
 
+#ifndef PROD
   config_print(config);
+#endif
 
   fclose(fp);
   return config;
@@ -345,8 +341,9 @@ int sock_bind(void) {
   return sockfd;
 }
 
-void xsock_write(int fd, char *msg) {
-  if (write(fd, msg, strlen(msg)) < 0) {
+void xsend(int fd, char *msg) {
+  if (send(fd, msg, strlen(msg), 0) < 0) {
+    close(fd);
     die("failed to write to socket fd %d", fd);
   }
 }
@@ -370,9 +367,9 @@ typedef struct HandlerArgs {
 } handler_args_t;
 
 void handle_conn(handler_args_t *args) {
-  char buf[HTTP_REQUEST_BUFFER] = { 0 };
+  char buf[HTTP_REQUEST_BUFFER];
 
-  int len = read(args->fd, buf, HTTP_REQUEST_BUFFER);
+  int len = recv(args->fd, buf, HTTP_REQUEST_BUFFER, 0);
   if (len == -1) {
     if (errno == EAGAIN) {
       return;
@@ -383,24 +380,20 @@ void handle_conn(handler_args_t *args) {
   http_request_t req = http_request_parse(buf);
 
   if (strcmp(req.method, "GET")) {
-    xsock_write(args->fd, "HTTP/1.1 404 Not Found\r\n\r\nInvalid route!");
+    xsend(args->fd, "HTTP/1.1 404 Not Found\r\n\r\nInvalid method!\r\n");
     return;
   }
 
   string_t *redirect = config_get(config, req.path);
   if (!redirect) {
-    xsock_write(args->fd, "HTTP/1.1 404 Not Found\r\n\r\nInvalid route!");
+    xsend(args->fd, "HTTP/1.1 404 Not Found\r\n\r\nInvalid route!\r\n");
     return;
   }
 
-  string_t res = string_from("HTTP/1.1 307 Temporary Redirect\r\nLocation: ");
-
-  string_push_str(&res, redirect->ptr, redirect->len);
-  string_push_str(&res, "\r\n", 2);
-
-  xsock_write(args->fd, res.ptr);
-  string_dealloc(&res);
-  close(args->fd);
+  FILE *stream = fdopen(args->fd, "w");
+  fprintf(stream, "HTTP/1.1 307 Temporary Redirect\r\nLocation: %s\r\nConnection: close\r\n",
+          redirect->ptr);
+  fclose(stream);
 }
 
 int main(void) {
@@ -409,8 +402,8 @@ int main(void) {
   int epfd = epoll_create1(O_CLOEXEC);
   if (epfd < 0) die("failed to create epoll instance");
 
-  struct epoll_event listen_ev = { .data.fd = sfd, .events = EPOLLIN | EPOLLET };
-  struct epoll_event inotify_ev = { .data.fd = ifd, .events = EPOLLIN | EPOLLET };
+  struct epoll_event listen_ev = { .data.fd = sfd, .events = EPOLLIN };
+  struct epoll_event inotify_ev = { .data.fd = ifd, .events = EPOLLIN };
 
   if (epoll_ctl(epfd, EPOLL_CTL_ADD, ifd, &inotify_ev))
     die("failed to add inotify fd to epoll interest list");
@@ -428,24 +421,20 @@ int main(void) {
   for (;;) {
     int evs = epoll_wait(epfd, events, EPOLL_MAX_EVENTS, -1);
     if (evs < 0) die("epoll wait failed");
-
     for (int e = 0; e < evs; e++) {
       struct epoll_event event = events[e];
       if ((event.events & EPOLLERR) || (event.events & EPOLLHUP)) die("epoll err/hup");
       if (event.data.fd == sfd) {
         int newfd;
-        while ((newfd = accept4(sfd, NULL, NULL, SOCK_NONBLOCK)) != -1) {
+        while ((newfd = accept(sfd, NULL, NULL)) != -1) {
+          sock_set_nonblock(newfd);
           struct epoll_event accepted_ev = { .data.fd = newfd, .events = EPOLLIN | EPOLLET };
-          if (epoll_ctl(epfd, EPOLL_CTL_ADD, newfd, &accepted_ev)) {
+          if (epoll_ctl(epfd, EPOLL_CTL_ADD, newfd, &accepted_ev))
             die("failed to add fd %d to epoll interest list", newfd);
-          }
         }
       } else if (event.data.fd == ifd) {
         int len = read(ifd, &last_inotif_ev, sizeof(last_inotif_ev));
-        if (len == -1) {
-          if (errno == EAGAIN) continue;
-          die("failed to read from inotify fd");
-        };
+        if (len == -1) die("failed to read from inotify fd");
 
         if (last_inotif_ev.mask & IN_CLOSE_WRITE) {
           reload("detected config file change! reloading...");
