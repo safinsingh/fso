@@ -117,6 +117,12 @@ FILE *xfopen(char *name, char *mode) {
   return fp;
 }
 
+FILE *xfdopen(int fd, char *mode) {
+  FILE *stream = fdopen(fd, mode);
+  if (!stream) die("failed to create stream for fd: %d", fd);
+  return stream;
+}
+
 int xfcntl(int fd, int flags, ...) {
   va_list argp;
   va_start(argp, flags);
@@ -460,7 +466,7 @@ void handle_conn(handler_args_t *args) {
     return;
   }
 
-  FILE *stream = fdopen(args->fd, "w");
+  FILE *stream = xfdopen(args->fd, "w");
   xfprintf(stream, "HTTP/1.1 307 Temporary Redirect\r\nLocation: %s\r\nConnection: close\r\n",
            "http://safin.dev");
   fclose(stream);
