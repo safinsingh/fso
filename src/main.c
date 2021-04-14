@@ -22,6 +22,7 @@
 #include <fcntl.h>
 #include <netinet/in.h>
 #include <pthread.h>
+#include <stdarg.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -34,7 +35,7 @@
 #define PORT 3107
 #define INITIAL_STRING_CAPACITY 32
 
-#define THREAD_POOL_QUEUE_LEN 128
+#define THREAD_POOL_QUEUE_LEN 8192
 #define THREAD_POOL_THREADS 8
 
 #define EPOLL_MAX_EVENTS 512
@@ -45,6 +46,7 @@
 #define web(fmt, ...) printf("   \033[0;36m[web]\033[0m " fmt "\n", ##__VA_ARGS__);
 #define config(fmt, ...) printf("\033[0;32m[config]\033[0m " fmt "\n", ##__VA_ARGS__);
 #define reload(fmt, ...) printf("\033[0;35m[reload]\033[0m " fmt "\n", ##__VA_ARGS__);
+#define warn(fmt, ...) printf("  \033[0;33m[warn]\033[0m " fmt "\n", ##__VA_ARGS__);
 #define die(fmt, ...)                                                                \
   do {                                                                               \
     fprintf(stderr, " \033[0;31m[fatal]\033[0m :: " fmt "\n            errno: %s\n", \
@@ -80,6 +82,93 @@ char *xstrtok_r(char *str, char *delim, char **save_ptr) {
   char *tok = strtok_r(str, delim, save_ptr);
   if (!tok) die("failed to strtok");
   return tok;
+}
+
+void xpthread_mutex_init(pthread_mutex_t *mux, pthread_mutexattr_t *attr) {
+  if (pthread_mutex_init(mux, attr)) die("failed to initialize mutex");
+}
+
+void xpthread_cond_init(pthread_cond_t *cond, pthread_condattr_t *attr) {
+  if (pthread_cond_init(cond, attr)) die("failed to initialize condvar");
+}
+
+void xpthread_create(pthread_t *thread, pthread_attr_t *attr, void *(*init)(void *), void *arg) {
+  if (pthread_create(thread, attr, init, arg)) die("failed to create thread");
+}
+
+void xpthread_cond_signal(pthread_cond_t *cond) {
+  if (pthread_cond_signal(cond)) die("failed to wake up threads with condvar");
+}
+
+int xinotify_init1(int flags) {
+  int ifd = inotify_init1(flags);
+  if (ifd < 0) die("failed to initialize inotify instance");
+  return ifd;
+}
+
+void xinotify_add_watch(int fd, char *name, unsigned int mask) {
+  int wd = inotify_add_watch(fd, name, mask);
+  if (wd < 0) die("failed to add watch to inotify instance");
+}
+
+FILE *xfopen(char *name, char *mode) {
+  FILE *fp = fopen(name, mode);
+  if (!fp) die("failed to open file: %s", name);
+  return fp;
+}
+
+int xfcntl(int fd, int flags, ...) {
+  va_list argp;
+  va_start(argp, flags);
+  void *arg = va_arg(argp, void *);
+  int s = fcntl(fd, flags, arg);
+  va_end(argp);
+
+  if (s < 0) die("fnctl failed to set flags: %d on fd: %d", flags, fd);
+  return s;
+}
+
+void xsetsockopt(int fd, int level, int optname, void *optval, socklen_t optlen) {
+  if (setsockopt(fd, level, optname, optval, optlen))
+    die("failed to set opt: %d on socket fd: %d", optname, fd);
+}
+
+void xbind(int fd, struct sockaddr *addr, socklen_t len) {
+  bind(fd, addr, len);
+}
+
+void xlisten(int fd, int maxconns) {
+  if (listen(fd, maxconns)) die("failed to begin listening");
+}
+
+void xsend(int fd, char *msg) {
+  if (send(fd, msg, strlen(msg), 0) < 0) {
+    close(fd);
+    die("failed to write to socket fd %d", fd);
+  }
+}
+
+void xfprintf(FILE *stream, const char *fmt, ...) {
+  va_list argp;
+  va_start(argp, fmt);
+  if (vfprintf(stream, fmt, argp) < 0) die("failed to fprintf to stream");
+  va_end(argp);
+}
+
+void xepoll_ctl(int epfd, int op, int fd, struct epoll_event *ev) {
+  if (epoll_ctl(epfd, op, fd, ev)) die("failed to add fd %d to epoll interest list", fd);
+}
+
+int xepoll_create1(int flags) {
+  int epfd = epoll_create1(flags);
+  if (epfd < 0) die("failed to create epoll instance");
+  return epfd;
+}
+
+int xepoll_wait(int epfd, struct epoll_event *events, int maxevents, int timeout) {
+  int evs = epoll_wait(epfd, events, maxevents, timeout);
+  if (evs < 0) die("failed to epoll_wait");
+  return evs;
 }
 
 typedef struct String {
@@ -148,11 +237,9 @@ typedef struct ThreadPool {
 
 void *thread_init(void *arg);
 void thread_pool_init(thread_pool_t *pool, int threads_len, int jobs_cap) {
-  if (pthread_mutex_init(&pool->job_lock, NULL)) die("failed to initialize thread pool job mutex");
-  if (pthread_mutex_init(&pool->job_notify_lock, NULL))
-    die("failed to initialize thread pool condvar mutex");
-  if (pthread_cond_init(&pool->job_notify, NULL))
-    die("failed to initialize thread pool job condvar");
+  xpthread_mutex_init(&pool->job_lock, NULL);
+  xpthread_mutex_init(&pool->job_notify_lock, NULL);
+  xpthread_cond_init(&pool->job_notify, NULL);
 
   pool->jobs_cap = jobs_cap;
   pool->jobs_head = 0;
@@ -163,7 +250,7 @@ void thread_pool_init(thread_pool_t *pool, int threads_len, int jobs_cap) {
   pool->jobs = xmalloc(jobs_cap * sizeof(*pool->jobs));
 
   for (int t = 0; t < threads_len; t++) {
-    if (pthread_create(&pool->threads[t], NULL, thread_init, pool)) die("failed to create thread");
+    xpthread_create(&pool->threads[t], NULL, thread_init, pool);
   }
 }
 
@@ -186,7 +273,7 @@ void *thread_init(void *arg) {
 
   for (;;) {
     pthread_mutex_lock(&pool->job_notify_lock);
-    while (pool->jobs_len == 0) pthread_cond_wait(&pool->job_notify, &pool->job_notify_lock);
+    pthread_cond_wait(&pool->job_notify, &pool->job_notify_lock);
     pthread_mutex_unlock(&pool->job_notify_lock);
 
     pthread_mutex_lock(&pool->job_lock);
@@ -205,7 +292,9 @@ void thread_pool_dispatch(thread_pool_t *pool, void (*fn)(void *), void *arg) {
   thread_pool_enqueue(pool, (job_t){ .fn = fn, .arg = arg });
   pthread_mutex_unlock(&pool->job_lock);
 
-  if (pthread_cond_signal(&pool->job_notify)) die("failed to wake up threads with condvar");
+  pthread_mutex_lock(&pool->job_notify_lock);
+  xpthread_cond_signal(&pool->job_notify);
+  pthread_mutex_unlock(&pool->job_notify_lock);
 }
 
 typedef struct Link {
@@ -271,8 +360,7 @@ void config_dealloc(config_t *config) {
 
 typedef enum ParserState { KEY, VALUE } parser_state_t;
 config_t *config_parse(void) {
-  FILE *fp = fopen(CONFIG_FILE, "r");
-  if (!fp) die("failed to open configuration file");
+  FILE *fp = xfopen(CONFIG_FILE, "r");
 
   parser_state_t state = KEY;
   config_t *config = xmalloc(sizeof(*config));
@@ -304,28 +392,22 @@ config_t *config_parse(void) {
 }
 
 int config_initialize_inotify(void) {
-  int ifd = inotify_init1(IN_NONBLOCK);
-  if (ifd < 0) die("failed to initialize an inotify instance, does `config.fso` exist?");
-
-  int wd = inotify_add_watch(ifd, CONFIG_FILE, IN_CLOSE_WRITE);
-  if (wd < 0) die("failed to add watch on config file to inotify instance");
+  int ifd = xinotify_init1(IN_NONBLOCK);
+  xinotify_add_watch(ifd, CONFIG_FILE, IN_CLOSE_WRITE);
 
   return ifd;
 }
 
 void sock_set_nonblock(int fd) {
-  int flags = fcntl(fd, F_GETFL);
-  if (flags < 0) die("failed to retrieve flags on socket with fd %d", fd);
-  if ((fcntl(fd, F_SETFL, flags | O_NONBLOCK)) < 0)
-    die("failed to set socket pointed to by fd %d as nonblocking", fd);
+  int flags = xfcntl(fd, F_GETFL);
+  xfcntl(fd, F_SETFL, flags | O_NONBLOCK);
 }
 
 int sock_bind(void) {
   int sockfd = socket(AF_INET, SOCK_STREAM, 0);
 
   static int yes = 1;
-  if (setsockopt(sockfd, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(yes)))
-    die("failed to set SO_REUSEADDR on socket");
+  xsetsockopt(sockfd, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(yes));
   sock_set_nonblock(sockfd);
 
   struct sockaddr_in addr = { .sin_port = htons(PORT),
@@ -333,19 +415,11 @@ int sock_bind(void) {
                               .sin_family = AF_INET,
                               .sin_zero = { 0 } };
 
-  if (bind(sockfd, (struct sockaddr *)&addr, sizeof(addr)))
-    die("failed to bind socket to port %d", PORT);
-  if (listen(sockfd, SOMAXCONN)) die("failed to begin listening on port %d", PORT);
+  xbind(sockfd, (struct sockaddr *)&addr, sizeof(addr));
+  xlisten(sockfd, SOMAXCONN);
 
   web("starting server on port %d", PORT);
   return sockfd;
-}
-
-void xsend(int fd, char *msg) {
-  if (send(fd, msg, strlen(msg), 0) < 0) {
-    close(fd);
-    die("failed to write to socket fd %d", fd);
-  }
 }
 
 typedef struct Request {
@@ -369,12 +443,8 @@ typedef struct HandlerArgs {
 void handle_conn(handler_args_t *args) {
   char buf[HTTP_REQUEST_BUFFER];
 
-  int len = recv(args->fd, buf, HTTP_REQUEST_BUFFER, 0);
-  if (len == -1) {
-    if (errno == EAGAIN) {
-      return;
-    }
-    die("failed to read socket fd %d", args->fd);
+  while (recv(args->fd, buf, HTTP_REQUEST_BUFFER, 0) == -1) {
+    if (errno != EAGAIN) die("failed to read socket fd %d", args->fd);
   }
 
   http_request_t req = http_request_parse(buf);
@@ -391,52 +461,51 @@ void handle_conn(handler_args_t *args) {
   }
 
   FILE *stream = fdopen(args->fd, "w");
-  fprintf(stream, "HTTP/1.1 307 Temporary Redirect\r\nLocation: %s\r\nConnection: close\r\n",
-          redirect->ptr);
+  xfprintf(stream, "HTTP/1.1 307 Temporary Redirect\r\nLocation: %s\r\nConnection: close\r\n",
+           "http://safin.dev");
   fclose(stream);
 }
 
 int main(void) {
-  int sfd = sock_bind();
+  config = config_parse();
+
   int ifd = config_initialize_inotify();
-  int epfd = epoll_create1(O_CLOEXEC);
-  if (epfd < 0) die("failed to create epoll instance");
+  int sfd = sock_bind();
+
+  int epfd = xepoll_create1(O_CLOEXEC);
 
   struct epoll_event listen_ev = { .data.fd = sfd, .events = EPOLLIN };
   struct epoll_event inotify_ev = { .data.fd = ifd, .events = EPOLLIN };
 
-  if (epoll_ctl(epfd, EPOLL_CTL_ADD, ifd, &inotify_ev))
-    die("failed to add inotify fd to epoll interest list");
-  if (epoll_ctl(epfd, EPOLL_CTL_ADD, sfd, &listen_ev))
-    die("failed to add socket fd to epoll interest list");
-
-  struct inotify_event last_inotif_ev;
-  struct epoll_event events[EPOLL_MAX_EVENTS];
+  xepoll_ctl(epfd, EPOLL_CTL_ADD, ifd, &inotify_ev);
+  xepoll_ctl(epfd, EPOLL_CTL_ADD, sfd, &listen_ev);
 
   thread_pool_t pool;
   thread_pool_init(&pool, THREAD_POOL_THREADS, THREAD_POOL_QUEUE_LEN);
 
-  config = config_parse();
-
+  struct epoll_event events[EPOLL_MAX_EVENTS];
   for (;;) {
-    int evs = epoll_wait(epfd, events, EPOLL_MAX_EVENTS, -1);
-    if (evs < 0) die("epoll wait failed");
+    int evs = xepoll_wait(epfd, events, EPOLL_MAX_EVENTS, -1);
     for (int e = 0; e < evs; e++) {
       struct epoll_event event = events[e];
-      if ((event.events & EPOLLERR) || (event.events & EPOLLHUP)) die("epoll err/hup");
+      if (event.events & EPOLLERR || !(event.events & EPOLLIN)) {
+        warn("epoll err");
+        close(event.data.fd);
+        continue;
+      }
       if (event.data.fd == sfd) {
         int newfd;
         while ((newfd = accept(sfd, NULL, NULL)) != -1) {
           sock_set_nonblock(newfd);
           struct epoll_event accepted_ev = { .data.fd = newfd, .events = EPOLLIN | EPOLLET };
-          if (epoll_ctl(epfd, EPOLL_CTL_ADD, newfd, &accepted_ev))
-            die("failed to add fd %d to epoll interest list", newfd);
+          xepoll_ctl(epfd, EPOLL_CTL_ADD, newfd, &accepted_ev);
         }
       } else if (event.data.fd == ifd) {
-        int len = read(ifd, &last_inotif_ev, sizeof(last_inotif_ev));
+        struct inotify_event iev;
+        int len = read(ifd, &iev, sizeof(iev));
         if (len == -1) die("failed to read from inotify fd");
 
-        if (last_inotif_ev.mask & IN_CLOSE_WRITE) {
+        if (iev.mask & IN_CLOSE_WRITE) {
           reload("detected config file change! reloading...");
 
           pthread_mutex_lock(&config_mux);
@@ -447,8 +516,10 @@ int main(void) {
           reload("reloaded successfully!");
         }
       } else {
-        handler_args_t args = { .fd = event.data.fd };
-        thread_pool_dispatch(&pool, (void *)&handle_conn, &args);
+        handler_args_t *args = xmalloc(sizeof(*args));
+        args->fd = event.data.fd;
+
+        thread_pool_dispatch(&pool, (void *)&handle_conn, args);
       }
     }
   }

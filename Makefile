@@ -3,14 +3,20 @@
 CFLAGS = -std=c99 -pthread -Wall -Werror
 SOURCES = ./src/main.c
 TARGET = ./bin/fso
-DEFAULT_GOAL = dev
-CC = gcc
+CC = clang
 
 main:
 	$(CC) -o $(TARGET) $(CFLAGS) -g $(SOURCES)
 
 prod:
-	$(CC) -o $(TARGET)  $(CFLAGS) -O2 -DPROD $(SOURCES)
+# lol
+	$(CC) -o $(TARGET)  $(CFLAGS) -Ofast -march=native -DPROD $(SOURCES)
+
+clean:
+	[ -f $(TARGET) ] && rm $(TARGET)
+
+run:
+	$(TARGET)
 
 test:
-	deno run --allow-net test/index.ts
+	bash test/test.sh
