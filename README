@@ -1,7 +1,12 @@
 fso - fast [link] shortener
 ===========================
 
-fso is a fast implementation of a link shortener. you can configure your links like so in a `config.fso` file like so:
+fso is a fast (see [`testing`]) implementation of a link shortener
+written in pure C99.
+
+# getting started
+
+you can configure your links like so in a `config.fso` file like so:
 
 ```
 /      :  https://safin.dev
@@ -19,14 +24,8 @@ and run with:
 ./fso
 ```
 
-todo:
-- [x] multithreading
-- [x] hot-reload config file
-- [ ] fix broken fd errors
+# testing
 
-developing:
-
-you can run `make dev` to build a development release with debugging symbols. note that the `prod` goal will apply the `O2` flag to $CC, while `dev` will not.
-
-limitations:
-- only works on linux due to use of linux-specific syscalls
+running `make test` will generate a `config.fso` file with some junk
+and prepare for a benchmark. note: `hyperfine` must be installed to
+benchmark `fso`.
