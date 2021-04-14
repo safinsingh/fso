@@ -1,23 +1,26 @@
 #!/usr/bin/env bash
 
-echo 'building...'
-make prod
+echo "building..."
+make prod >/dev/null || exit 1
 
-trash() { xxd -u -l 5 -p /dev/urandom; }
-
+echo "filling up config file..."
 : >config.fso
-for _ in {0..300}; do
-   # add some garbage to config
+
+# add some garbage to config
+for _ in {0..500}; do
+   trash() { xxd -u -l 5 -p /dev/urandom; }
+
    alias=$(trash)
    to=$(trash)
-   echo "/$alias:$to" >>config.fso
+
+   echo "$alias:$to" >>config.fso
 done
 
 # add true record
-echo '/hello:http://safin.dev' >>config.fso
+echo "hello:http://safin.dev" >>config.fso
 
-printf 'please run `fso` in a separate terminal before testing...'
+printf "please run \`fso\` in a separate terminal before testing... "
 read -r
 
-echo 'running benchmark...'
-hyperfine 'curl -s -o /dev/null http://localhost:3107/hello'
+echo "running benchmark..."
+ab -n 1000 -c 500 "http://localhost:3107/hello"

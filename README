@@ -28,5 +28,5 @@ and run with:
 # testing
 
 running `make test` will generate a `config.fso` file with some junk
-and prepare for a benchmark. note: `hyperfine` must be installed to
+and prepare for a benchmark. note: ApacheBench must be installed to
 benchmark `fso`.
