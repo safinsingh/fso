@@ -1,6 +1,6 @@
 .PHONY: test
 
-CFLAGS = -std=c99 -pthread -Wall -Werror
+CFLAGS = -std=c11 -pthread -Wall -Werror
 SOURCES = ./src/main.c
 TARGET = ./bin/fso
 CC = clang
@@ -10,7 +10,7 @@ main:
 
 prod:
 # lol
-	$(CC) -o $(TARGET)  $(CFLAGS) -Ofast -march=native -ffast-math -DPROD $(SOURCES)
+	$(CC) -o $(TARGET)  $(CFLAGS) -O3 -march=native -ffast-math -DPROD $(SOURCES)
 
 clean:
 	[ -f $(TARGET) ] && rm $(TARGET)

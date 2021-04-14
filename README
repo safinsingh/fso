@@ -1,16 +1,17 @@
 fso - fast [link] shortener
 ===========================
 
-fso is a fast (see [`testing`]) implementation of a link shortener
-written in pure C99.
+`fso` is a fast (see `testing`) implementation of a link shortener
+written in pure C11.
 
 # getting started
 
 you can configure your links like so in a `config.fso` file like so:
 
 ```
-/      :  https://safin.dev
-/test  :  https://google.com
+/       :  https://safin.dev
+test    :  https://google.com
+my/url  :  https://stackoverflow.com
 ```
 
 then, build with:

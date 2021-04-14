@@ -22,7 +22,9 @@
 #include <fcntl.h>
 #include <netinet/in.h>
 #include <pthread.h>
+#include <signal.h>
 #include <stdarg.h>
+#include <stdatomic.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -96,6 +98,14 @@ void xpthread_create(pthread_t *thread, pthread_attr_t *attr, void *(*init)(void
   if (pthread_create(thread, attr, init, arg)) die("failed to create thread");
 }
 
+void xpthread_cancel(pthread_t thread) {
+  if (pthread_cancel(thread)) die("failed to cancel thread");
+}
+
+void xpthread_join(pthread_t thread, void **thread_return) {
+  if (pthread_join(thread, thread_return)) die("failed to join thread");
+}
+
 void xpthread_cond_signal(pthread_cond_t *cond) {
   if (pthread_cond_signal(cond)) die("failed to wake up threads with condvar");
 }
@@ -149,9 +159,9 @@ void xlisten(int fd, int maxconns) {
 
 void xsend(int fd, char *msg) {
   if (send(fd, msg, strlen(msg), 0) < 0) {
-    close(fd);
     die("failed to write to socket fd %d", fd);
   }
+  close(fd);
 }
 
 void xfprintf(FILE *stream, const char *fmt, ...) {
@@ -232,14 +242,19 @@ typedef struct ThreadPool {
   pthread_mutex_t job_notify_lock;
   pthread_cond_t job_notify;
   pthread_t *threads;
+  int threads_len;
 
   pthread_mutex_t job_lock;
   job_t *jobs;
-  int jobs_cap;
   int jobs_len;
+  int jobs_cap;
   int jobs_head;
   int jobs_tail;
+
+  atomic_bool keep_alive;
 } thread_pool_t;
+
+thread_pool_t pool;
 
 void *thread_init(void *arg);
 void thread_pool_init(thread_pool_t *pool, int threads_len, int jobs_cap) {
@@ -251,6 +266,8 @@ void thread_pool_init(thread_pool_t *pool, int threads_len, int jobs_cap) {
   pool->jobs_head = 0;
   pool->jobs_len = 0;
   pool->jobs_tail = jobs_cap - 1;
+  pool->threads_len = threads_len;
+  pool->keep_alive = ATOMIC_VAR_INIT(true);
 
   pool->threads = xmalloc(threads_len * sizeof(*pool->threads));
   pool->jobs = xmalloc(jobs_cap * sizeof(*pool->jobs));
@@ -258,6 +275,16 @@ void thread_pool_init(thread_pool_t *pool, int threads_len, int jobs_cap) {
   for (int t = 0; t < threads_len; t++) {
     xpthread_create(&pool->threads[t], NULL, thread_init, pool);
   }
+}
+
+void thread_pool_dealloc(thread_pool_t *pool) {
+  atomic_store_explicit(&pool->keep_alive, false, memory_order_release);
+  for (int t = 0; t < pool->threads_len; t++) {
+    xpthread_cancel(pool->threads[t]);
+    xpthread_join(pool->threads[t], NULL);
+  }
+  free(pool->threads);
+  free(pool->jobs);
 }
 
 job_t thread_pool_dequeue(thread_pool_t *pool) {
@@ -274,10 +301,16 @@ void thread_pool_enqueue(thread_pool_t *pool, job_t job) {
   pool->jobs_len += 1;
 }
 
+void thread_cleanup(void *arg) {
+  thread_pool_t *pool = (thread_pool_t *)arg;
+  pthread_mutex_unlock(&pool->job_notify_lock);
+}
+
 void *thread_init(void *arg) {
   thread_pool_t *pool = (thread_pool_t *)arg;
+  pthread_cleanup_push(&thread_cleanup, arg);
 
-  for (;;) {
+  while (atomic_load_explicit(&pool->keep_alive, memory_order_acquire)) {
     pthread_mutex_lock(&pool->job_notify_lock);
     pthread_cond_wait(&pool->job_notify, &pool->job_notify_lock);
     pthread_mutex_unlock(&pool->job_notify_lock);
@@ -289,6 +322,7 @@ void *thread_init(void *arg) {
     (*job.fn)(job.arg);
   }
 
+  pthread_cleanup_pop(0);
   pthread_exit(EXIT_SUCCESS);
   return NULL;
 }
@@ -352,7 +386,7 @@ string_t *config_get(config_t *config, char *alias) {
 
 void config_dealloc(config_t *config) {
   link_t *link = config->head;
-  while (link->next) {
+  while (link) {
     link_t *tmp = link;
 
     string_dealloc(&tmp->alias);
@@ -438,6 +472,7 @@ http_request_t http_request_parse(char *buf) {
 
   req.method = xstrtok_r(buf, " ", &buf);
   req.path = xstrtok_r(NULL, " ", &buf);
+  if (strlen(req.path) != 1) req.path += sizeof(char);
 
   return req;
 }
@@ -472,12 +507,20 @@ void handle_conn(handler_args_t *args) {
   fclose(stream);
 }
 
+void sig_handler(int signum) {
+  warn("caught signal: %s, exiting peacefully...", strsignal(signum));
+  config_dealloc(config);
+  thread_pool_dealloc(&pool);
+  exit(EXIT_SUCCESS);
+}
+
 int main(void) {
   config = config_parse();
 
+  signal(SIGINT, sig_handler);
+
   int ifd = config_initialize_inotify();
   int sfd = sock_bind();
-
   int epfd = xepoll_create1(O_CLOEXEC);
 
   struct epoll_event listen_ev = { .data.fd = sfd, .events = EPOLLIN };
@@ -486,7 +529,6 @@ int main(void) {
   xepoll_ctl(epfd, EPOLL_CTL_ADD, ifd, &inotify_ev);
   xepoll_ctl(epfd, EPOLL_CTL_ADD, sfd, &listen_ev);
 
-  thread_pool_t pool;
   thread_pool_init(&pool, THREAD_POOL_THREADS, THREAD_POOL_QUEUE_LEN);
 
   struct epoll_event events[EPOLL_MAX_EVENTS];
