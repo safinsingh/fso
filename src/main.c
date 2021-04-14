@@ -278,7 +278,7 @@ void thread_pool_init(thread_pool_t *pool, int threads_len, int jobs_cap) {
 }
 
 void thread_pool_dealloc(thread_pool_t *pool) {
-  atomic_store_explicit(&pool->keep_alive, false, memory_order_release);
+  atomic_store(&pool->keep_alive, false);
   for (int t = 0; t < pool->threads_len; t++) {
     xpthread_cancel(pool->threads[t]);
     xpthread_join(pool->threads[t], NULL);
@@ -310,7 +310,7 @@ void *thread_init(void *arg) {
   thread_pool_t *pool = (thread_pool_t *)arg;
   pthread_cleanup_push(&thread_cleanup, arg);
 
-  while (atomic_load_explicit(&pool->keep_alive, memory_order_acquire)) {
+  while (atomic_load(&pool->keep_alive)) {
     pthread_mutex_lock(&pool->job_notify_lock);
     pthread_cond_wait(&pool->job_notify, &pool->job_notify_lock);
     pthread_mutex_unlock(&pool->job_notify_lock);
