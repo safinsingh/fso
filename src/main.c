@@ -193,40 +193,35 @@ typedef struct {
 } job_t;
 
 typedef struct {
-  pthread_mutex_t job_notify_lock;
-  pthread_cond_t job_notify;
   pthread_t *threads;
   int threads_len;
 
-  pthread_mutex_t job_lock;
+  // baseed on: https://www.snellman.net/blog/archive/2016-12-13-ring-buffers/
   job_t *jobs;
   int jobs_len;
   int jobs_cap;
-  int jobs_head;
-  int jobs_tail;
+  atomic_uint jobs_reader;
+  atomic_uint jobs_writer;
 
   atomic_bool keep_alive;
 } thread_pool_t;
 
+const uint32_t LOCK_MASK = 1 << ((sizeof(LOCK_MASK) * 8) - 1);
 thread_pool_t pool;
 
 void *thread_init(void *arg);
-void thread_pool_init(thread_pool_t *pool, int threads_len, int jobs_cap) {
-  xpthread_mutex_init(&pool->job_lock, NULL);
-  xpthread_mutex_init(&pool->job_notify_lock, NULL);
-  xpthread_cond_init(&pool->job_notify, NULL);
+void thread_pool_init(thread_pool_t *pool) {
+  pool->jobs_cap = THREAD_POOL_QUEUE_LEN;
 
-  pool->jobs_cap = jobs_cap;
-  pool->jobs_head = 0;
-  pool->jobs_len = 0;
-  pool->jobs_tail = jobs_cap - 1;
-  pool->threads_len = threads_len;
+  pool->jobs_reader = ATOMIC_VAR_INIT(0);
+  pool->jobs_writer = ATOMIC_VAR_INIT(0);
   pool->keep_alive = ATOMIC_VAR_INIT(true);
 
-  pool->threads = xmalloc(threads_len * sizeof(*pool->threads));
-  pool->jobs = xmalloc(jobs_cap * sizeof(*pool->jobs));
+  pool->threads_len = THREAD_POOL_THREADS;
+  pool->threads = xmalloc(pool->threads_len * sizeof(*pool->threads));
+  pool->jobs = xmalloc(pool->jobs_cap * sizeof(*pool->jobs));
 
-  for (int t = 0; t < threads_len; t++) {
+  for (int t = 0; t < pool->threads_len; t++) {
     xpthread_create(&pool->threads[t], NULL, thread_init, pool);
   }
 }
@@ -241,54 +236,74 @@ void thread_pool_dealloc(thread_pool_t *pool) {
   free(pool->jobs);
 }
 
-job_t thread_pool_dequeue(thread_pool_t *pool) {
-  job_t job = pool->jobs[pool->jobs_head];
-  pool->jobs_head = (pool->jobs_head + 1) % pool->jobs_cap;
-  pool->jobs_len -= 1;
-  return job;
-}
-
 void thread_pool_enqueue(thread_pool_t *pool, job_t job) {
-  if (pool->jobs_cap == pool->jobs_len) die("thread pool job queue full");
-  pool->jobs_tail = (pool->jobs_tail + 1) % pool->jobs_cap;
-  pool->jobs[pool->jobs_tail] = job;
-  pool->jobs_len += 1;
+  for (;;) {
+    // load the writer position
+    uint32_t tail = atomic_load(&pool->jobs_writer);
+
+    // NOTE: the following would be uncommented if this was an MPMC queue, in order
+    // to ensure enqueue safety. however, for performance reasons, it is ommitted.
+    //
+    // // if our writer is locked, an enqueue is in progress
+    // if (tail & LOCK_MASK) continue;
+    // // attempt to lock our writer, starting over if an enqueue has occurred
+    // if (!atomic_compare_exchange_weak(&pool->jobs_writer, &tail, tail | LOCK_MASK)) continue;
+
+    // load the reader position
+    uint32_t head = atomic_load(&pool->jobs_reader);
+    // if writer position + a full rotation modulo 2 full rotations equals
+    // our reader position, die. we don't care if the reader is locked lol.
+    // we use modulo 2 * cap so we don't have to waste a spot in our ringbuffer!
+    if (((tail + pool->jobs_cap) % (pool->jobs_cap * 2)) == (head & ~LOCK_MASK))
+      die("job queue is full!");
+    // now, to compute our actual write offset, we modulo our writer position
+    // with the capacity (NOTE: not *2)
+    pool->jobs[tail] = job;
+    // shift over and unlock the writer!
+    atomic_store(&pool->jobs_writer, (tail + 1) % (pool->jobs_cap * 2));
+    break;
+  }
 }
 
-void thread_cleanup(void *arg) {
-  thread_pool_t *pool = (thread_pool_t *)arg;
-  pthread_mutex_unlock(&pool->job_notify_lock);
+job_t thread_pool_dequeue(thread_pool_t *pool) {
+  for (;;) {
+    // load the reader position
+    uint32_t head = atomic_load(&pool->jobs_reader);
+    // if our reader is locked, a dequeue is in progress
+    if (head & LOCK_MASK) continue;
+    // attempt to lock our reader, starting over if a dequeue has occurred
+    if (!atomic_compare_exchange_weak(&pool->jobs_reader, &head, head | LOCK_MASK)) continue;
+    // load the writer position
+    uint32_t tail = atomic_load(&pool->jobs_writer);
+    // if our reader is equal to our writer position, our queue is empty. here,
+    // we spin!
+    if (head == (tail & ~LOCK_MASK)) {
+      atomic_store(&pool->jobs_reader, head);
+      continue;
+    }
+    // dequeue our job from the buffer
+    job_t job = pool->jobs[head];
+    // shift over and unlock the reader!
+    atomic_store(&pool->jobs_reader, (head + 1) % (pool->jobs_cap * 2));
+    // return our job
+    return job;
+  }
 }
 
 void *thread_init(void *arg) {
   thread_pool_t *pool = (thread_pool_t *)arg;
-  pthread_cleanup_push(&thread_cleanup, arg);
 
-  while (atomic_load(&pool->keep_alive)) {
-    pthread_mutex_lock(&pool->job_notify_lock);
-    pthread_cond_wait(&pool->job_notify, &pool->job_notify_lock);
-    pthread_mutex_unlock(&pool->job_notify_lock);
-
-    pthread_mutex_lock(&pool->job_lock);
+  for (;;) {
     job_t job = thread_pool_dequeue(pool);
-    pthread_mutex_unlock(&pool->job_lock);
-
     (*job.fn)(job.arg);
   }
 
-  pthread_cleanup_pop(0);
   pthread_exit(EXIT_SUCCESS);
   return NULL;
 }
 
-void thread_pool_dispatch(thread_pool_t *pool, void (*fn)(void *), void *arg) {
-  pthread_mutex_lock(&pool->job_lock);
+static inline void thread_pool_dispatch(thread_pool_t *pool, void (*fn)(void *), void *arg) {
   thread_pool_enqueue(pool, (job_t){ .fn = fn, .arg = arg });
-  pthread_mutex_unlock(&pool->job_lock);
-
-  pthread_mutex_lock(&pool->job_notify_lock);
-  xpthread_cond_signal(&pool->job_notify);
-  pthread_mutex_unlock(&pool->job_notify_lock);
 }
 
 typedef struct {
@@ -511,7 +526,7 @@ int main(void) {
   xepoll_ctl(epfd, EPOLL_CTL_ADD, ifd, &inotify_ev);
   xepoll_ctl(epfd, EPOLL_CTL_ADD, sfd, &listen_ev);
 
-  thread_pool_init(&pool, THREAD_POOL_THREADS, THREAD_POOL_QUEUE_LEN);
+  thread_pool_init(&pool);
   signal(SIGINT, sig_handler);
 
   struct epoll_event events[EPOLL_MAX_EVENTS];

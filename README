@@ -2,7 +2,14 @@ fso - fast [link] shortener
 ===========================
 
 `fso` is a fast (see `testing`) implementation of a link shortener
-written in pure C11.
+written in pure C11. fso is multithreaded and is backed by a bounded
+spmc (mpmc-capable) lock-free atomic ring buffer.
+
+note 1: at the moment, `fso` will not exit correctly since i haven't yet
+found a way to break the spinlock incurred from dequeuing jobs.
+
+note 2: the atomic ring buffer implementation is fairly new to the codebase
+and optimization will happen over time (`pause` instructions, etc).
 
 # getting started
 

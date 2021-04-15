@@ -5,3 +5,4 @@ Cpp11BracedListStyle: false
 IndentWidth: 2
 PointerAlignment: Right
 ColumnLimit: 100
+AlignAfterOpenBracket: Align
