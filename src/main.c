@@ -34,6 +34,7 @@
 #include <sys/socket.h>
 #include <unistd.h>
 
+/// CONSTANTS ///
 #define PORT 3107
 #define INITIAL_VEC_CAPACITY 64
 
@@ -44,6 +45,8 @@
 #define HTTP_REQUEST_BUFFER 128
 
 #define CONFIG_FILE "config.fso"
+
+/// LOGGING MACROS ///
 
 #define web(fmt, ...) printf("   \033[0;36m[web]\033[0m " fmt "\n", ##__VA_ARGS__);
 #define config(fmt, ...) printf("\033[0;32m[config]\033[0m " fmt "\n", ##__VA_ARGS__);
@@ -56,80 +59,100 @@
     exit(EXIT_FAILURE);                                                              \
   } while (0)
 
+/// INFAILLABLE ABSTRACTIONS ///
+
 void *xmalloc(size_t size) {
   void *ret = malloc(size);
-  if (!ret) die("failed to allocate with malloc");
+  if (!ret) {
+    die("failed to allocate with malloc");
+  }
   return ret;
 }
 
 void *xcalloc(size_t els, size_t size) {
   void *ret = calloc(els, size);
-  if (!ret) die("failed to allocate with calloc");
+  if (!ret) {
+    die("failed to allocate with calloc");
+  }
   return ret;
 }
 
 void *xrealloc(void *ptr, size_t size) {
   void *ret = realloc(ptr, size);
-  if (!ret) die("failed to reallocate with recalloc");
+  if (!ret) {
+    die("failed to reallocate with recalloc");
+  }
   return ret;
 }
 
 void *xmemcpy(void *dest, const void *src, size_t len) {
   void *ret = memcpy(dest, src, len);
-  if (!ret) die("failed to memcpy");
+  if (!ret) {
+    die("failed to memcpy");
+  }
   return ret;
 }
 
 char *xstrtok_r(char *str, char *delim, char **save_ptr) {
   char *tok = strtok_r(str, delim, save_ptr);
-  if (!tok) die("failed to strtok");
+  if (!tok) {
+    die("failed to strtok");
+  }
   return tok;
 }
 
 void xpthread_mutex_init(pthread_mutex_t *mux, pthread_mutexattr_t *attr) {
-  if (pthread_mutex_init(mux, attr)) die("failed to initialize mutex");
-}
-
-void xpthread_cond_init(pthread_cond_t *cond, pthread_condattr_t *attr) {
-  if (pthread_cond_init(cond, attr)) die("failed to initialize condvar");
+  if (pthread_mutex_init(mux, attr)) {
+    die("failed to initialize mutex");
+  }
 }
 
 void xpthread_create(pthread_t *thread, pthread_attr_t *attr, void *(*init)(void *), void *arg) {
-  if (pthread_create(thread, attr, init, arg)) die("failed to create thread");
+  if (pthread_create(thread, attr, init, arg)) {
+    die("failed to create thread");
+  }
 }
 
 void xpthread_cancel(pthread_t thread) {
-  if (pthread_cancel(thread)) die("failed to cancel thread");
+  if (pthread_cancel(thread)) {
+    die("failed to cancel thread");
+  }
 }
 
 void xpthread_join(pthread_t thread, void **thread_return) {
-  if (pthread_join(thread, thread_return)) die("failed to join thread");
-}
-
-void xpthread_cond_signal(pthread_cond_t *cond) {
-  if (pthread_cond_signal(cond)) die("failed to wake up threads with condvar");
+  if (pthread_join(thread, thread_return)) {
+    die("failed to join thread");
+  }
 }
 
 int xinotify_init1(int flags) {
   int ifd = inotify_init1(flags);
-  if (ifd < 0) die("failed to initialize inotify instance");
+  if (ifd < 0) {
+    die("failed to initialize inotify instance");
+  }
   return ifd;
 }
 
 void xinotify_add_watch(int fd, char *name, unsigned int mask) {
   int wd = inotify_add_watch(fd, name, mask);
-  if (wd < 0) die("failed to add watch to inotify instance");
+  if (wd < 0) {
+    die("failed to add watch to inotify instance");
+  }
 }
 
 FILE *xfopen(char *name, char *mode) {
   FILE *fp = fopen(name, mode);
-  if (!fp) die("failed to open file: %s", name);
+  if (!fp) {
+    die("failed to open file: %s", name);
+  }
   return fp;
 }
 
 FILE *xfdopen(int fd, char *mode) {
   FILE *stream = fdopen(fd, mode);
-  if (!stream) die("failed to create stream for fd: %d", fd);
+  if (!stream) {
+    die("failed to create stream for fd: %d", fd);
+  }
   return stream;
 }
 
@@ -140,13 +163,16 @@ int xfcntl(int fd, int flags, ...) {
   int s = fcntl(fd, flags, arg);
   va_end(argp);
 
-  if (s < 0) die("fnctl failed to set flags: %d on fd: %d", flags, fd);
+  if (s < 0) {
+    die("fnctl failed to set flags: %d on fd: %d", flags, fd);
+  }
   return s;
 }
 
 void xsetsockopt(int fd, int level, int optname, void *optval, socklen_t optlen) {
-  if (setsockopt(fd, level, optname, optval, optlen))
+  if (setsockopt(fd, level, optname, optval, optlen)) {
     die("failed to set opt: %d on socket fd: %d", optname, fd);
+  }
 }
 
 void xbind(int fd, struct sockaddr *addr, socklen_t len) {
@@ -154,7 +180,9 @@ void xbind(int fd, struct sockaddr *addr, socklen_t len) {
 }
 
 void xlisten(int fd, int maxconns) {
-  if (listen(fd, maxconns)) die("failed to begin listening");
+  if (listen(fd, maxconns)) {
+    die("failed to begin listening");
+  }
 }
 
 void xsend(int fd, char *msg) {
@@ -167,145 +195,37 @@ void xsend(int fd, char *msg) {
 void xfprintf(FILE *stream, const char *fmt, ...) {
   va_list argp;
   va_start(argp, fmt);
-  if (vfprintf(stream, fmt, argp) < 0) die("failed to fprintf to stream");
+  if (vfprintf(stream, fmt, argp) < 0) {
+    die("failed to fprintf to stream");
+  }
   va_end(argp);
 }
 
 void xepoll_ctl(int epfd, int op, int fd, struct epoll_event *ev) {
-  if (epoll_ctl(epfd, op, fd, ev)) die("failed to add fd %d to epoll interest list", fd);
+  if (epoll_ctl(epfd, op, fd, ev)) {
+    die("failed to add fd %d to epoll interest list", fd);
+  }
 }
 
 int xepoll_create1(int flags) {
   int epfd = epoll_create1(flags);
-  if (epfd < 0) die("failed to create epoll instance");
+  if (epfd < 0) {
+    die("failed to create epoll instance");
+  }
   return epfd;
 }
 
 int xepoll_wait(int epfd, struct epoll_event *events, int maxevents, int timeout) {
   int evs = epoll_wait(epfd, events, maxevents, timeout);
-  if (evs < 0) die("failed to epoll_wait");
+  if (evs < 0) {
+    die("failed to epoll_wait");
+  }
   return evs;
 }
 
-typedef struct {
-  void (*fn)(void *);
-  void *arg;
-} job_t;
+/// CONVENIENCE DYNAMIC UTILITIES ///
 
-typedef struct {
-  pthread_t *threads;
-  int threads_len;
-
-  // baseed on: https://www.snellman.net/blog/archive/2016-12-13-ring-buffers/
-  job_t *jobs;
-  int jobs_len;
-  int jobs_cap;
-  atomic_uint jobs_reader;
-  atomic_uint jobs_writer;
-
-  atomic_bool keep_alive;
-} thread_pool_t;
-
-const uint32_t LOCK_MASK = 1 << ((sizeof(LOCK_MASK) * 8) - 1);
-thread_pool_t pool;
-
-void *thread_init(void *arg);
-void thread_pool_init(thread_pool_t *pool) {
-  pool->jobs_cap = THREAD_POOL_QUEUE_LEN;
-
-  pool->jobs_reader = ATOMIC_VAR_INIT(0);
-  pool->jobs_writer = ATOMIC_VAR_INIT(0);
-  pool->keep_alive = ATOMIC_VAR_INIT(true);
-
-  pool->threads_len = THREAD_POOL_THREADS;
-  pool->threads = xmalloc(pool->threads_len * sizeof(*pool->threads));
-  pool->jobs = xmalloc(pool->jobs_cap * sizeof(*pool->jobs));
-
-  for (int t = 0; t < pool->threads_len; t++) {
-    xpthread_create(&pool->threads[t], NULL, thread_init, pool);
-  }
-}
-
-void thread_pool_dealloc(thread_pool_t *pool) {
-  atomic_store(&pool->keep_alive, false);
-  for (int t = 0; t < pool->threads_len; t++) {
-    xpthread_cancel(pool->threads[t]);
-    xpthread_join(pool->threads[t], NULL);
-  }
-  free(pool->threads);
-  free(pool->jobs);
-}
-
-void thread_pool_enqueue(thread_pool_t *pool, job_t job) {
-  for (;;) {
-    // load the writer position
-    uint32_t tail = atomic_load(&pool->jobs_writer);
-
-    // NOTE: the following would be uncommented if this was an MPMC queue, in order
-    // to ensure enqueue safety. however, for performance reasons, it is ommitted.
-    //
-    // // if our writer is locked, an enqueue is in progress
-    // if (tail & LOCK_MASK) continue;
-    // // attempt to lock our writer, starting over if an enqueue has occurred
-    // if (!atomic_compare_exchange_weak(&pool->jobs_writer, &tail, tail | LOCK_MASK)) continue;
-
-    // load the reader position
-    uint32_t head = atomic_load(&pool->jobs_reader);
-    // if writer position + a full rotation modulo 2 full rotations equals
-    // our reader position, die. we don't care if the reader is locked lol.
-    // we use modulo 2 * cap so we don't have to waste a spot in our ringbuffer!
-    if (((tail + pool->jobs_cap) % (pool->jobs_cap * 2)) == (head & ~LOCK_MASK))
-      die("job queue is full!");
-    // now, to compute our actual write offset, we modulo our writer position
-    // with the capacity (NOTE: not *2)
-    pool->jobs[tail] = job;
-    // shift over and unlock the writer!
-    atomic_store(&pool->jobs_writer, (tail + 1) % (pool->jobs_cap * 2));
-    break;
-  }
-}
-
-job_t thread_pool_dequeue(thread_pool_t *pool) {
-  for (;;) {
-    // load the reader position
-    uint32_t head = atomic_load(&pool->jobs_reader);
-    // if our reader is locked, a dequeue is in progress
-    if (head & LOCK_MASK) continue;
-    // attempt to lock our reader, starting over if a dequeue has occurred
-    if (!atomic_compare_exchange_weak(&pool->jobs_reader, &head, head | LOCK_MASK)) continue;
-    // load the writer position
-    uint32_t tail = atomic_load(&pool->jobs_writer);
-    // if our reader is equal to our writer position, our queue is empty. here,
-    // we spin!
-    if (head == (tail & ~LOCK_MASK)) {
-      atomic_store(&pool->jobs_reader, head);
-      continue;
-    }
-    // dequeue our job from the buffer
-    job_t job = pool->jobs[head];
-    // shift over and unlock the reader!
-    atomic_store(&pool->jobs_reader, (head + 1) % (pool->jobs_cap * 2));
-    // return our job
-    return job;
-  }
-}
-
-void *thread_init(void *arg) {
-  thread_pool_t *pool = (thread_pool_t *)arg;
-
-  for (;;) {
-    job_t job = thread_pool_dequeue(pool);
-    (*job.fn)(job.arg);
-  }
-
-  pthread_exit(EXIT_SUCCESS);
-  return NULL;
-}
-
-static inline void thread_pool_dispatch(thread_pool_t *pool, void (*fn)(void *), void *arg) {
-  thread_pool_enqueue(pool, (job_t){ .fn = fn, .arg = arg });
-}
-
+/// Growable string.
 typedef struct {
   char *backing;
   int len;
@@ -328,6 +248,7 @@ void string_push(string_t *str, char c) {
   str->len++;
 }
 
+/// Growable vector of char*s.
 typedef struct {
   char **backing;
   int len;
@@ -348,6 +269,146 @@ void vec_string_push(vec_string_t *vec, char *str) {
   vec->len++;
 }
 
+/// ATOMIC JOB RINGBUFFER IMPLEMENTATION ///
+/// NOTE: inpired by: https://www.snellman.net/blog/archive/2016-12-13-ring-buffers/
+
+const uint32_t LOCK_MASK = 1 << ((sizeof(LOCK_MASK) * 8) - 1);
+
+typedef struct {
+  void (*fn)(void *);
+  void *arg;
+} job_t;
+
+typedef struct {
+  job_t *jobs;
+  int jobs_len;
+  int jobs_cap;
+
+  atomic_uint jobs_reader;
+  atomic_uint jobs_writer;
+} job_queue_t;
+
+void job_queue_enqueue(job_queue_t *queue, job_t job) {
+  for (;;) {
+    // load the writer position
+    uint32_t tail = atomic_load(&queue->jobs_writer);
+
+    // NOTE: the following would be uncommented if this was an MPMC queue, in order
+    // to ensure enqueue safety. however, for performance reasons, it is ommitted.
+    //
+    // // if our writer is locked, an enqueue is in progress
+    // if (tail & LOCK_MASK) continue;
+    // // attempt to lock our writer, starting over if an enqueue has occurred
+    // if (!atomic_compare_exchange_weak(&queue->jobs_writer, &tail, tail | LOCK_MASK)) continue;
+
+    // load the reader position
+    uint32_t head = atomic_load(&queue->jobs_reader);
+
+    // if writer position + a full rotation modulo 2 full rotations equals
+    // our reader position, die. we don't care if the reader is locked lol.
+    // we use modulo 2 * cap so we don't have to waste a spot in our ringbuffer!
+    if (((tail + queue->jobs_cap) % (queue->jobs_cap * 2)) == (head & ~LOCK_MASK)) {
+      die("job queue is full!");
+    }
+
+    // now, to compute our actual write offset, we modulo our writer position
+    // with the capacity (NOTE: not *2)
+    queue->jobs[tail] = job;
+
+    // shift over and unlock the writer!
+    atomic_store(&queue->jobs_writer, (tail + 1) % (queue->jobs_cap * 2));
+    break;
+  }
+}
+
+job_t job_queue_dequeue(job_queue_t *queue) {
+  for (;;) {
+    // load the reader position
+    uint32_t head = atomic_load(&queue->jobs_reader);
+
+    // if our reader is locked, a dequeue is in progress
+    if (head & LOCK_MASK) {
+      continue;
+    }
+
+    // attempt to lock our reader, starting over if a dequeue has occurred
+    if (!atomic_compare_exchange_weak(&queue->jobs_reader, &head, head | LOCK_MASK)) {
+      continue;
+    }
+
+    // load the writer position
+    uint32_t tail = atomic_load(&queue->jobs_writer);
+
+    // if our reader is equal to our writer position, our queue is empty. here,
+    // we spin!
+    if (head == (tail & ~LOCK_MASK)) {
+      atomic_store(&queue->jobs_reader, head);
+      continue;
+    }
+
+    // dequeue our job from the buffer
+    job_t job = queue->jobs[head];
+
+    // shift over and unlock the reader!
+    atomic_store(&queue->jobs_reader, (head + 1) % (queue->jobs_cap * 2));
+
+    // return our job
+    return job;
+  }
+}
+
+/// THREAD POOL IMPLEMENTATION ///
+
+typedef struct {
+  pthread_t *threads;
+  job_queue_t job_queue;
+  atomic_bool keep_alive;
+} thread_pool_t;
+
+thread_pool_t pool;
+
+void *thread_init(void *arg);
+void thread_pool_init() {
+  pool.job_queue.jobs_reader = ATOMIC_VAR_INIT(0);
+  pool.job_queue.jobs_writer = ATOMIC_VAR_INIT(0);
+  pool.keep_alive = ATOMIC_VAR_INIT(true);
+
+  pool.threads = xmalloc(THREAD_POOL_QUEUE_LEN * sizeof(*pool.threads));
+  pool.job_queue.jobs = xmalloc(pool.job_queue.jobs_cap * sizeof(*pool.job_queue.jobs));
+
+  for (int t = 0; t < THREAD_POOL_QUEUE_LEN; t++) {
+    xpthread_create(&pool.threads[t], NULL, thread_init, &pool);
+  }
+}
+
+void thread_pool_dealloc() {
+  atomic_store(&pool.keep_alive, false);
+  for (int t = 0; t < THREAD_POOL_QUEUE_LEN; t++) {
+    xpthread_cancel(pool.threads[t]);
+    xpthread_join(pool.threads[t], NULL);
+  }
+  free(pool.threads);
+  free(pool.job_queue.jobs);
+}
+
+void thread_pool_dispatch(void (*fn)(void *), void *arg) {
+  job_queue_enqueue(&pool.job_queue, (job_t){.fn = fn, .arg = arg});
+}
+
+void *thread_init(void *arg) {
+  thread_pool_t *pool = (thread_pool_t *)arg;
+
+  for (;;) {
+    job_t job = job_queue_dequeue(&pool->job_queue);
+    (*job.fn)(job.arg);
+  }
+
+  pthread_exit(EXIT_SUCCESS);
+  return NULL;
+}
+
+/// CONFIGURATION FILE PARSING ///
+
 typedef struct {
   vec_string_t keys;
   vec_string_t values;
@@ -356,44 +417,17 @@ typedef struct {
 static pthread_mutex_t config_mux = PTHREAD_MUTEX_INITIALIZER;
 config_t cfg;
 
-void config_dealloc() {
-  for (int i = 0; i < cfg.keys.len; i++) {
-    free(cfg.keys.backing[i]);
-  }
-  for (int i = 0; i < cfg.values.len; i++) {
-    free(cfg.values.backing[i]);
-  }
-  free(cfg.keys.backing);
-  free(cfg.values.backing);
-}
-
-void config_print() {
-  if (cfg.keys.len != cfg.values.len) {
-    config_dealloc();
-    die("config key/value array length mismatch: got %d, %d", cfg.keys.len, cfg.values.len);
-  }
-  for (int n = 0; n < cfg.keys.len; ++n) {
-    config("alias '%s' points to '%s'", cfg.keys.backing[n], cfg.values.backing[n]);
-  }
-}
-
-static inline char *config_get(char *alias) {
-  int n_keys = cfg.keys.len;
-  for (int n = 0; n < n_keys; ++n) {
-    if (!strcmp(alias, cfg.keys.backing[n])) return cfg.values.backing[n];
-  }
-  return NULL;
-}
-
-void config_parse() {
+void config_print(void);
+void config_parse(void) {
   FILE *fp = xfopen(CONFIG_FILE, "r");
 
   vec_string_init(&cfg.keys);
   vec_string_init(&cfg.values);
 
   string_t temp;
-  int value = 0;
   string_init(&temp);
+
+  int value = 0;
 
   char c;
   while ((c = fgetc(fp)) != EOF) {
@@ -421,11 +455,14 @@ void config_parse() {
   }
 
   if (temp.len != 0) {
-    if (value) vec_string_push(&cfg.values, temp.backing);
-    else
+    if (value) {
+      vec_string_push(&cfg.values, temp.backing);
+    } else {
       die("expected value for key: %s", temp.backing);
-  } else if (temp.backing)
+    }
+  } else if (temp.backing) {
     free(temp.backing);
+  }
 
 #ifndef PROD
   config_print();
@@ -434,12 +471,46 @@ void config_parse() {
   fclose(fp);
 }
 
+char *config_get(char *alias) {
+  for (int n = 0; n < cfg.keys.len; ++n) {
+    if (!strcmp(alias, cfg.keys.backing[n])) {
+      return cfg.values.backing[n];
+    }
+  }
+  return NULL;
+}
+
+void config_dealloc(void);
+void config_print(void) {
+  if (cfg.keys.len != cfg.values.len) {
+    config_dealloc();
+    die("config key/value array length mismatch: got %d, %d", cfg.keys.len, cfg.values.len);
+  }
+  for (int n = 0; n < cfg.keys.len; ++n) {
+    config("alias '%s' points to '%s'", cfg.keys.backing[n], cfg.values.backing[n]);
+  }
+}
+
+// Watch configuration file for changes
 int config_initialize_inotify(void) {
   int ifd = xinotify_init1(IN_NONBLOCK);
   xinotify_add_watch(ifd, CONFIG_FILE, IN_CLOSE_WRITE);
 
   return ifd;
 }
+
+void config_dealloc(void) {
+  for (int i = 0; i < cfg.keys.len; i++) {
+    free(cfg.keys.backing[i]);
+  }
+  for (int i = 0; i < cfg.values.len; i++) {
+    free(cfg.values.backing[i]);
+  }
+  free(cfg.keys.backing);
+  free(cfg.values.backing);
+}
+
+/// SOCKET UTILITIES ///
 
 void sock_set_nonblock(int fd) {
   int flags = xfcntl(fd, F_GETFL);
@@ -453,10 +524,10 @@ int sock_bind(void) {
   xsetsockopt(sockfd, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(yes));
   sock_set_nonblock(sockfd);
 
-  struct sockaddr_in addr = { .sin_port = htons(PORT),
-                              .sin_addr = { .s_addr = htonl(INADDR_ANY) },
-                              .sin_family = AF_INET,
-                              .sin_zero = { 0 } };
+  struct sockaddr_in addr = {.sin_port = htons(PORT),
+                             .sin_addr = {.s_addr = htonl(INADDR_ANY)},
+                             .sin_family = AF_INET,
+                             .sin_zero = {0}};
 
   xbind(sockfd, (struct sockaddr *)&addr, sizeof(addr));
   xlisten(sockfd, SOMAXCONN);
@@ -464,6 +535,8 @@ int sock_bind(void) {
   web("starting server on port %d", PORT);
   return sockfd;
 }
+
+/// HTTP UTILITIES ///
 
 typedef struct {
   char *method;
@@ -473,18 +546,25 @@ typedef struct {
 void http_request_parse(http_request_t *req, char *buf) {
   req->method = xstrtok_r(buf, " ", &buf);
   req->path = xstrtok_r(NULL, " ", &buf);
-  if (strlen(req->path) != 1) req->path += sizeof(char);
+  if (strlen(req->path) != 1) {
+    req->path += sizeof(char);
+  }
 }
+
+/// CORE HANDLER ///
 
 typedef struct {
   int fd;
 } handler_args_t;
 
-void handle_conn(handler_args_t *args) {
+void handle_conn(void *arg) {
+  handler_args_t *args = (handler_args_t *)arg;
   char buf[HTTP_REQUEST_BUFFER];
 
   while (recv(args->fd, buf, HTTP_REQUEST_BUFFER, 0) == -1) {
-    if (errno != EAGAIN) die("failed to read socket fd %d", args->fd);
+    if (errno != EAGAIN) {
+      die("failed to read socket fd %d", args->fd);
+    }
   }
 
   http_request_t req;
@@ -507,10 +587,12 @@ void handle_conn(handler_args_t *args) {
   fclose(stream);
 }
 
+/// BINARY ///
+
 void sig_handler(int signum) {
   warn("caught signal: %s, exiting peacefully...", strsignal(signum));
   config_dealloc();
-  thread_pool_dealloc(&pool);
+  thread_pool_dealloc();
   exit(EXIT_SUCCESS);
 }
 
@@ -521,12 +603,12 @@ int main(void) {
   int sfd = sock_bind();
   int epfd = xepoll_create1(O_CLOEXEC);
 
-  struct epoll_event listen_ev = { .data.fd = sfd, .events = EPOLLIN };
-  struct epoll_event inotify_ev = { .data.fd = ifd, .events = EPOLLIN };
+  struct epoll_event listen_ev = {.data.fd = sfd, .events = EPOLLIN};
+  struct epoll_event inotify_ev = {.data.fd = ifd, .events = EPOLLIN};
   xepoll_ctl(epfd, EPOLL_CTL_ADD, ifd, &inotify_ev);
   xepoll_ctl(epfd, EPOLL_CTL_ADD, sfd, &listen_ev);
 
-  thread_pool_init(&pool);
+  thread_pool_init();
   signal(SIGINT, sig_handler);
 
   struct epoll_event events[EPOLL_MAX_EVENTS];
@@ -541,13 +623,15 @@ int main(void) {
         int newfd;
         while ((newfd = accept(sfd, NULL, NULL)) != -1) {
           sock_set_nonblock(newfd);
-          struct epoll_event accepted_ev = { .data.fd = newfd, .events = EPOLLIN | EPOLLET };
+          struct epoll_event accepted_ev = {.data.fd = newfd, .events = EPOLLIN | EPOLLET};
           xepoll_ctl(epfd, EPOLL_CTL_ADD, newfd, &accepted_ev);
         }
       } else if (event.data.fd == ifd) {
         struct inotify_event iev;
         int len = read(ifd, &iev, sizeof(iev));
-        if (len == -1) die("failed to read from inotify fd");
+        if (len == -1) {
+          die("failed to read from inotify fd");
+        }
 
         if (iev.mask & IN_CLOSE_WRITE) {
           reload("detected config file change! reloading...");
@@ -560,8 +644,8 @@ int main(void) {
           reload("reloaded successfully!");
         }
       } else {
-        handler_args_t args = { .fd = event.data.fd };
-        thread_pool_dispatch(&pool, (void *)&handle_conn, &args);
+        handler_args_t args = {.fd = event.data.fd};
+        thread_pool_dispatch(&handle_conn, &args);
       }
     }
   }

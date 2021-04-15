@@ -1,7 +1,4 @@
 BasedOnStyle: Chromium
-AllowShortLoopsOnASingleLine: true
-AllowShortIfStatementsOnASingleLine: Always
-Cpp11BracedListStyle: false
 IndentWidth: 2
 PointerAlignment: Right
 ColumnLimit: 100
