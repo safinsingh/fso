@@ -7,17 +7,17 @@ echo "filling up config file..."
 : >config.fso
 
 # add some garbage to config
-for _ in {0..500}; do
+for _ in {0..300}; do
    trash() { xxd -u -l 5 -p /dev/urandom; }
 
    alias=$(trash)
    to=$(trash)
 
-   echo "$alias:$to" >>config.fso
+   echo "$alias - $to" >>config.fso
 done
 
 # add true record
-echo "hello:http://safin.dev" >>config.fso
+echo "hello      - http://safin.dev" >>config.fso
 
 printf "please run \`fso\` in a separate terminal before testing... "
 read -r

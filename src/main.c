@@ -35,7 +35,7 @@
 #include <unistd.h>
 
 #define PORT 3107
-#define INITIAL_STRING_CAPACITY 32
+#define INITIAL_VEC_CAPACITY 64
 
 #define THREAD_POOL_QUEUE_LEN 8192
 #define THREAD_POOL_THREADS 8
@@ -187,58 +187,12 @@ int xepoll_wait(int epfd, struct epoll_event *events, int maxevents, int timeout
   return evs;
 }
 
-typedef struct String {
-  char *ptr;
-  int len;
-  int cap;
-} string_t;
-
-string_t string_new(void) {
-  static int cap = INITIAL_STRING_CAPACITY;
-  char *ptr = xcalloc(cap, sizeof(*ptr));
-
-  return (string_t){ .ptr = ptr, .len = 0, .cap = cap };
-}
-
-void _string_realloc(string_t *string) {
-  int cap = string->cap * 2;
-  char *ptr = xrealloc(string->ptr, cap * sizeof(*ptr));
-
-  string->cap = cap;
-  string->ptr = ptr;
-}
-
-void string_push(string_t *string, char ch) {
-  if (string->len + 1 == string->cap) _string_realloc(string);
-  string->ptr[string->len] = ch;
-  string->len++;
-}
-
-void string_dealloc(string_t *string) {
-  free(string->ptr);
-}
-
-string_t string_from(char *ptr) {
-  int len = strlen(ptr);
-
-  int pow = 1;
-  while ((1 << pow) < len) pow++;
-  int cap = 1 << pow;
-
-  char *dup = xcalloc(cap, sizeof(*dup));
-  return (string_t){ .ptr = xmemcpy(dup, ptr, len), .len = len, .cap = cap };
-}
-
-void string_push_str(string_t *string, char *ptr, int len) {
-  for (int i = 0; i < len; i++) string_push(string, ptr[i]);
-}
-
-typedef struct Job {
+typedef struct {
   void (*fn)(void *);
   void *arg;
 } job_t;
 
-typedef struct ThreadPool {
+typedef struct {
   pthread_mutex_t job_notify_lock;
   pthread_cond_t job_notify;
   pthread_t *threads;
@@ -337,98 +291,132 @@ void thread_pool_dispatch(thread_pool_t *pool, void (*fn)(void *), void *arg) {
   pthread_mutex_unlock(&pool->job_notify_lock);
 }
 
-typedef struct Link {
-  string_t alias;
-  string_t to;
-  struct Link *next;
-} link_t;
+typedef struct {
+  char *backing;
+  int len;
+  int cap;
+} string_t;
 
-link_t *new_link_entry(void) {
-  link_t *link = xmalloc(sizeof(*link));
-  link->alias = string_new();
-  link->to = string_new();
-  link->next = NULL;
-  return link;
+void string_init(string_t *str) {
+  str->backing = xmalloc(INITIAL_VEC_CAPACITY * sizeof(*str->backing));
+  *str->backing = '\0';
+  str->cap = INITIAL_VEC_CAPACITY;
+  str->len = 0;
 }
 
-link_t *last_link_entry(link_t *head) {
-  link_t *link = head;
-  while (link->next) link = link->next;
-  return link;
+void string_push(string_t *str, char c) {
+  if (str->cap == str->len + 1) {
+    str->backing = xrealloc(str->backing, (str->cap <<= 1) * sizeof(*str->backing));
+  }
+  str->backing[str->len] = c;
+  str->backing[str->len + 1] = '\0';
+  str->len++;
 }
 
-typedef struct Config {
-  link_t *head;
+typedef struct {
+  char **backing;
+  int len;
+  int cap;
+} vec_string_t;
+
+void vec_string_init(vec_string_t *vec) {
+  vec->backing = xmalloc(INITIAL_VEC_CAPACITY * sizeof(*vec->backing));
+  vec->cap = INITIAL_VEC_CAPACITY;
+  vec->len = 0;
+}
+
+void vec_string_push(vec_string_t *vec, char *str) {
+  if (vec->cap == vec->len) {
+    vec->backing = xrealloc(vec->backing, (vec->cap <<= 1) * sizeof(*vec->backing));
+  }
+  vec->backing[vec->len] = str;
+  vec->len++;
+}
+
+typedef struct {
+  vec_string_t keys;
+  vec_string_t values;
 } config_t;
 
-pthread_mutex_t config_mux = PTHREAD_MUTEX_INITIALIZER;
-config_t *config;
+static pthread_mutex_t config_mux = PTHREAD_MUTEX_INITIALIZER;
+config_t cfg;
 
-void config_print(config_t *config) {
-  link_t *link = config->head;
-  while (link->next) {
-    config("alias '%s' points to '%s'", link->alias.ptr, link->to.ptr);
-    link = link->next;
+void config_dealloc() {
+  for (int i = 0; i < cfg.keys.len; i++) {
+    free(cfg.keys.backing[i]);
+  }
+  for (int i = 0; i < cfg.values.len; i++) {
+    free(cfg.values.backing[i]);
+  }
+  free(cfg.keys.backing);
+  free(cfg.values.backing);
+}
+
+void config_print() {
+  if (cfg.keys.len != cfg.values.len) {
+    config_dealloc();
+    die("config key/value array length mismatch: got %d, %d", cfg.keys.len, cfg.values.len);
+  }
+  for (int n = 0; n < cfg.keys.len; ++n) {
+    config("alias '%s' points to '%s'", cfg.keys.backing[n], cfg.values.backing[n]);
   }
 }
 
-string_t *config_get(config_t *config, char *alias) {
-  link_t *link = config->head;
-  while (link->next) {
-    if (strcmp(link->alias.ptr, alias)) {
-      link = link->next;
-    } else {
-      return &link->to;
-    }
+static inline char *config_get(char *alias) {
+  int n_keys = cfg.keys.len;
+  for (int n = 0; n < n_keys; ++n) {
+    if (!strcmp(alias, cfg.keys.backing[n])) return cfg.values.backing[n];
   }
   return NULL;
 }
 
-void config_dealloc(config_t *config) {
-  link_t *link = config->head;
-  while (link) {
-    link_t *tmp = link;
-
-    string_dealloc(&tmp->alias);
-    string_dealloc(&tmp->to);
-
-    link = link->next;
-    free(tmp);
-  }
-  free(config);
-}
-
-typedef enum ParserState { KEY, VALUE } parser_state_t;
-config_t *config_parse(void) {
+void config_parse() {
   FILE *fp = xfopen(CONFIG_FILE, "r");
 
-  parser_state_t state = KEY;
-  config_t *config = xmalloc(sizeof(*config));
-  config->head = new_link_entry();
+  vec_string_init(&cfg.keys);
+  vec_string_init(&cfg.values);
+
+  string_t temp;
+  int value = 0;
+  string_init(&temp);
 
   char c;
   while ((c = fgetc(fp)) != EOF) {
-    if (c == ' ' || c == '\t' || c == '\v' || c == '\r' || c == '\f') continue;
-    if (state == KEY) {
-      if (c == ':') state = VALUE;
-      else
-        string_push(&last_link_entry(config->head)->alias, c);
-    } else {
-      if (c == '\n') {
-        state = KEY;
-        last_link_entry(config->head)->next = new_link_entry();
-      } else {
-        string_push(&last_link_entry(config->head)->to, c);
-      }
+    switch (c) {
+      case ' ':
+      case '\t':
+      case '\v':
+      case '\r':
+      case '\f':
+        continue;
+      case '-':
+        vec_string_push(&cfg.keys, temp.backing);
+        string_init(&temp);
+        value = 1;
+        break;
+      case '\n':
+        vec_string_push(&cfg.values, temp.backing);
+        string_init(&temp);
+        value = 0;
+        break;
+      default:
+        string_push(&temp, c);
+        break;
     }
   }
 
+  if (temp.len != 0) {
+    if (value) vec_string_push(&cfg.values, temp.backing);
+    else
+      die("expected value for key: %s", temp.backing);
+  } else if (temp.backing)
+    free(temp.backing);
+
 #ifndef PROD
-  config_print(config);
+  config_print();
 #endif
 
   fclose(fp);
-  return config;
 }
 
 int config_initialize_inotify(void) {
@@ -462,22 +450,18 @@ int sock_bind(void) {
   return sockfd;
 }
 
-typedef struct Request {
+typedef struct {
   char *method;
   char *path;
 } http_request_t;
 
-http_request_t http_request_parse(char *buf) {
-  http_request_t req;
-
-  req.method = xstrtok_r(buf, " ", &buf);
-  req.path = xstrtok_r(NULL, " ", &buf);
-  if (strlen(req.path) != 1) req.path += sizeof(char);
-
-  return req;
+void http_request_parse(http_request_t *req, char *buf) {
+  req->method = xstrtok_r(buf, " ", &buf);
+  req->path = xstrtok_r(NULL, " ", &buf);
+  if (strlen(req->path) != 1) req->path += sizeof(char);
 }
 
-typedef struct HandlerArgs {
+typedef struct {
   int fd;
 } handler_args_t;
 
@@ -488,14 +472,15 @@ void handle_conn(handler_args_t *args) {
     if (errno != EAGAIN) die("failed to read socket fd %d", args->fd);
   }
 
-  http_request_t req = http_request_parse(buf);
+  http_request_t req;
+  http_request_parse(&req, buf);
 
   if (strcmp(req.method, "GET")) {
     xsend(args->fd, "HTTP/1.1 404 Not Found\r\n\r\nInvalid method!\r\n");
     return;
   }
 
-  string_t *redirect = config_get(config, req.path);
+  char *redirect = config_get(req.path);
   if (!redirect) {
     xsend(args->fd, "HTTP/1.1 404 Not Found\r\n\r\nInvalid route!\r\n");
     return;
@@ -509,15 +494,13 @@ void handle_conn(handler_args_t *args) {
 
 void sig_handler(int signum) {
   warn("caught signal: %s, exiting peacefully...", strsignal(signum));
-  config_dealloc(config);
+  config_dealloc();
   thread_pool_dealloc(&pool);
   exit(EXIT_SUCCESS);
 }
 
 int main(void) {
-  config = config_parse();
-
-  signal(SIGINT, sig_handler);
+  config_parse();
 
   int ifd = config_initialize_inotify();
   int sfd = sock_bind();
@@ -525,23 +508,21 @@ int main(void) {
 
   struct epoll_event listen_ev = { .data.fd = sfd, .events = EPOLLIN };
   struct epoll_event inotify_ev = { .data.fd = ifd, .events = EPOLLIN };
-
   xepoll_ctl(epfd, EPOLL_CTL_ADD, ifd, &inotify_ev);
   xepoll_ctl(epfd, EPOLL_CTL_ADD, sfd, &listen_ev);
 
   thread_pool_init(&pool, THREAD_POOL_THREADS, THREAD_POOL_QUEUE_LEN);
+  signal(SIGINT, sig_handler);
 
   struct epoll_event events[EPOLL_MAX_EVENTS];
   for (;;) {
     int evs = xepoll_wait(epfd, events, EPOLL_MAX_EVENTS, -1);
     for (int e = 0; e < evs; e++) {
       struct epoll_event event = events[e];
-      if (event.events & EPOLLERR || !(event.events & EPOLLIN)) {
+      if (event.events & EPOLLERR) {
         warn("epoll err");
         close(event.data.fd);
-        continue;
-      }
-      if (event.data.fd == sfd) {
+      } else if (event.data.fd == sfd) {
         int newfd;
         while ((newfd = accept(sfd, NULL, NULL)) != -1) {
           sock_set_nonblock(newfd);
@@ -557,17 +538,15 @@ int main(void) {
           reload("detected config file change! reloading...");
 
           pthread_mutex_lock(&config_mux);
-          config_dealloc(config);
-          config = config_parse();
+          config_dealloc();
+          config_parse();
           pthread_mutex_unlock(&config_mux);
 
           reload("reloaded successfully!");
         }
       } else {
-        handler_args_t *args = xmalloc(sizeof(*args));
-        args->fd = event.data.fd;
-
-        thread_pool_dispatch(&pool, (void *)&handle_conn, args);
+        handler_args_t args = { .fd = event.data.fd };
+        thread_pool_dispatch(&pool, (void *)&handle_conn, &args);
       }
     }
   }

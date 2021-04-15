@@ -10,7 +10,7 @@ main:
 
 prod:
 # lol
-	$(CC) -o $(TARGET)  $(CFLAGS) -Ofast -march=native -DPROD $(SOURCES)
+	$(CC) -o $(TARGET)  $(CFLAGS) -O3 -ffast-math -march=native -DPROD $(SOURCES)
 
 clean:
 	[ -f $(TARGET) ] && rm $(TARGET)

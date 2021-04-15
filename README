@@ -9,9 +9,9 @@ written in pure C11.
 you can configure your links like so in a `config.fso` file like so:
 
 ```
-/       :  https://safin.dev
-test    :  https://google.com
-my/url  :  https://stackoverflow.com
+/       -  https://safin.dev
+test    -  https://google.com
+my/url  -  https://stackoverflow.com
 ```
 
 then, build with:
